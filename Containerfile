@@ -17,6 +17,7 @@ WORKDIR /src
 COPY CMakeLists.txt ./
 COPY VERSION ./
 COPY openapi.yaml ./
+COPY prompts/ prompts/
 COPY src/ src/
 COPY third_party/ third_party/
 
@@ -48,6 +49,8 @@ WORKDIR /app
 COPY --from=build /src/build/wallet_ai /app/wallet_ai
 # openapi.yaml + Swagger UI читаются с диска при GET /openapi.yaml, /docs.
 COPY openapi.yaml /app/openapi.yaml
+# Промпты — тоже с диска при старте (LLM_PROMPT_DIR, по умолчанию prompts/).
+COPY prompts/ /app/prompts/
 COPY third_party/swagger-ui/ /app/vendor/swagger-ui/
 
 USER appuser

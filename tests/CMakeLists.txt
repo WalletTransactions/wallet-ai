@@ -5,6 +5,8 @@ add_executable(wallet_ai_tests
     test_ai.cpp
 )
 target_include_directories(wallet_ai_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# Тесты читают настоящий prompts/expense.txt из исходников.
+target_compile_definitions(wallet_ai_tests PRIVATE WALLET_AI_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(wallet_ai_tests PRIVATE wallet_ai_core)
 
 add_test(NAME wallet_ai_unit_tests COMMAND wallet_ai_tests)

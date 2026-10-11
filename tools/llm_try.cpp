@@ -5,7 +5,10 @@
 //   LLM_URL=http://127.0.0.1:1234/v1 LLM_MODEL=wallet-parse \
 //     wallet_ai_llm_try --categories "Кафе,Продукты,Такси" \
 //       --wallets "Тинькофф:RUB,Revolut:EUR" --today 2026-10-11 \
-//       [--reasoning none] [--max-tokens 256] "вчера на такси 450 с тинькоффа" ...
+//       [--reasoning none] [--max-tokens 512] [--prompt prompts/expense.txt] \
+//       "вчера на такси 450 с тинькоффа" ...
+//
+// --prompt — другой файл промпта (подбор версий без правки prompts/).
 //
 // Печатает по строке JSON на фразу: статус, поля, время, токены.
 #include <cstdlib>
@@ -47,6 +50,7 @@ int main(int argc, char** argv) {
     llm::CallOptions opts;
     std::vector<std::string> texts;
     bool dump_body = false; // --dump-body: напечатать тело запроса первой фразы и выйти
+    std::string prompt_path = "prompts/expense.txt";
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -66,6 +70,8 @@ int main(int argc, char** argv) {
             opts.max_tokens = std::stoi(next());
         } else if (a == "--timeout-ms") {
             opts.timeout_ms = std::stoi(next());
+        } else if (a == "--prompt") {
+            prompt_path = next();
         } else if (a == "--dump-body") {
             dump_body = true;
         } else {
@@ -77,14 +83,22 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    llm::Prompt prompt;
+    try {
+        prompt = llm::load_prompt(prompt_path);
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << "\n";
+        return 2;
+    }
+
     if (dump_body) {
         llm::ExpenseRequest req = base;
         req.text = texts.front();
-        std::cout << llm::expense_request_body(req, cfg.model, opts).dump(2) << "\n";
+        std::cout << llm::expense_request_body(req, prompt, cfg.model, opts).dump(2) << "\n";
         return 0;
     }
 
-    auto client = llm::make_http_client(cfg);
+    auto client = llm::make_http_client(cfg, prompt);
     int failed = 0;
     for (const auto& t : texts) {
         llm::ExpenseRequest req = base;
@@ -110,7 +124,7 @@ int main(int argc, char** argv) {
         }
         std::cout << out.dump(-1, ' ', false) << "\n";
     }
-    std::cout << "prompt " << llm::kPromptVersion << ", reasoning "
+    std::cout << "prompt " << prompt.version << ", reasoning "
               << (opts.reasoning_effort.empty() ? "(default)" : opts.reasoning_effort) << "\n";
     return failed == 0 ? 0 : 1;
 }

@@ -24,13 +24,19 @@ std::string completion(const std::string& content, const std::string& finish = "
     return j.dump();
 }
 
+// Настоящий промпт из исходников — тесты проверяют сам файл, а не копию.
+const llm::Prompt& real_prompt() {
+    static const llm::Prompt p = llm::load_prompt(WALLET_AI_SOURCE_DIR "/prompts/expense.txt");
+    return p;
+}
+
 const char* kOk =
     R"({"amount":"450","currency":"","category":"Такси","wallet":"Тинькофф","date":"2026-10-10","comment":"","confidence":0.95})";
 
 } // namespace
 
 TEST(request_body_enums_include_empty_and_user_names) {
-    auto body = llm::expense_request_body(sample_request(), "wallet-parse", llm::CallOptions{});
+    auto body = llm::expense_request_body(sample_request(), real_prompt(), "wallet-parse", llm::CallOptions{});
     const auto& schema = body["response_format"]["json_schema"]["schema"];
     CHECK(body["response_format"]["json_schema"]["strict"].get<bool>());
     CHECK_EQ(schema["properties"]["category"]["enum"], (json{"Кафе", "Продукты", "Такси", ""}));
@@ -41,7 +47,7 @@ TEST(request_body_enums_include_empty_and_user_names) {
 
 TEST(request_body_text_only_in_last_user_message) {
     auto r = sample_request();
-    auto body = llm::expense_request_body(r, "wallet-parse", llm::CallOptions{});
+    auto body = llm::expense_request_body(r, real_prompt(), "wallet-parse", llm::CallOptions{});
     const auto& msgs = body["messages"];
     REQUIRE(msgs.size() >= 2u);
     CHECK_EQ(msgs[0]["role"].get<std::string>(), std::string("system"));
@@ -53,7 +59,7 @@ TEST(request_body_text_only_in_last_user_message) {
 }
 
 TEST(request_body_shots_satisfy_schema_enums) {
-    auto body = llm::expense_request_body(sample_request(), "wallet-parse", llm::CallOptions{});
+    auto body = llm::expense_request_body(sample_request(), real_prompt(), "wallet-parse", llm::CallOptions{});
     const auto& schema = body["response_format"]["json_schema"]["schema"]["properties"];
     int shots = 0;
     for (const auto& m : body["messages"]) {
@@ -71,7 +77,7 @@ TEST(request_body_shots_without_categories_and_wallets) {
     llm::ExpenseRequest r;
     r.text = "кофе 200";
     r.today = "2026-10-11";
-    auto body = llm::expense_request_body(r, "m", llm::CallOptions{});
+    auto body = llm::expense_request_body(r, real_prompt(), "m", llm::CallOptions{});
     CHECK_EQ(body["response_format"]["json_schema"]["schema"]["properties"]["category"]["enum"], (json{""}));
     for (const auto& m : body["messages"]) {
         if (m["role"] != "assistant") continue;
@@ -85,7 +91,7 @@ TEST(request_body_reasoning_and_limits) {
     llm::CallOptions opts;
     opts.reasoning_effort = "low";
     opts.max_tokens = 1024;
-    auto body = llm::expense_request_body(sample_request(), "wallet-parse", opts);
+    auto body = llm::expense_request_body(sample_request(), real_prompt(), "wallet-parse", opts);
     CHECK_EQ(body["reasoning_effort"].get<std::string>(), std::string("low"));
     CHECK_EQ(body["max_tokens"].get<int>(), 1024);
     CHECK_EQ(body["temperature"].get<int>(), 0);
@@ -93,7 +99,7 @@ TEST(request_body_reasoning_and_limits) {
     CHECK_EQ(body["model"].get<std::string>(), std::string("wallet-parse"));
 
     opts.reasoning_effort.clear();
-    CHECK(!llm::expense_request_body(sample_request(), "m", opts).contains("reasoning_effort"));
+    CHECK(!llm::expense_request_body(sample_request(), real_prompt(), "m", opts).contains("reasoning_effort"));
 }
 
 TEST(parse_ok) {
@@ -155,7 +161,7 @@ TEST(weekday_and_calendar_in_prompt) {
     CHECK_EQ(llm::weekday_ru("1969-12-31"), std::string("среда"));
     CHECK_EQ(llm::weekday_ru("bad"), std::string(""));
 
-    auto body = llm::expense_request_body(sample_request(), "m", llm::CallOptions{});
+    auto body = llm::expense_request_body(sample_request(), real_prompt(), "m", llm::CallOptions{});
     auto system = body["messages"][0]["content"].get<std::string>();
     CHECK(system.find("вчера (суббота) 2026-10-10") != std::string::npos);
     CHECK(system.find("позавчера (пятница) 2026-10-09") != std::string::npos);
@@ -173,8 +179,47 @@ TEST(add_days_across_boundaries) {
 }
 
 TEST(http_client_disabled_without_url) {
-    auto c = llm::make_http_client(llm::Config{});
+    auto c = llm::make_http_client(llm::Config{}, real_prompt());
     auto r = c->extract_expense(sample_request(), llm::CallOptions{});
     CHECK(r.status == llm::Status::Unavailable);
     CHECK_EQ(r.detail, std::string("llm_disabled"));
+}
+
+TEST(prompt_file_parses_with_version_and_without_comments) {
+    const auto& p = real_prompt();
+    CHECK(p.version.rfind("expense-", 0) == 0);
+    CHECK(p.text.find("# ") == std::string::npos);
+    CHECK(p.text.rfind("Ты разбираешь", 0) == 0);
+    for (const char* ph : {"{today}", "{weekday}", "{recent_days}", "{year}", "{categories}", "{wallets}"}) {
+        CHECK(p.text.find(ph) != std::string::npos);
+    }
+    auto rendered = llm::render_system_prompt(p, sample_request());
+    CHECK(rendered.find('{') == std::string::npos); // все подстановки заменены
+    CHECK(rendered.find("Категории: Кафе, Продукты, Такси.") != std::string::npos);
+}
+
+TEST(parse_prompt_rules) {
+    auto p = llm::parse_prompt("# коммент\r\n# version: test-1\r\nстрока 1\r\n# ещё\r\nстрока {today}\r\n");
+    CHECK_EQ(p.version, std::string("test-1"));
+    CHECK_EQ(p.text, std::string("строка 1\nстрока {today}"));
+
+    bool threw = false;
+    try {
+        llm::parse_prompt("текст без версии");
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    CHECK(threw);
+    threw = false;
+    try {
+        llm::load_prompt("/nonexistent/prompt.txt");
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    llm::ExpenseRequest empty;
+    empty.today = "2026-10-11";
+    auto none = llm::render_system_prompt(llm::Prompt{"v", "К: {categories}. W: {wallets}."}, empty);
+    CHECK_EQ(none, std::string("К: (нет). W: (нет)."));
 }

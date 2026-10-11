@@ -5,6 +5,7 @@
 #include <atomic>
 #include <memory>
 
+#include "llm_client.hpp"
 #include "llm_probe.hpp"
 #include "util/jwks.hpp"
 
@@ -13,6 +14,9 @@ struct AppState {
     std::unique_ptr<jwks::Cache> jwks;
 
     llm::Config llm;
+
+    // System-промпт разбора траты — prompts/expense.txt, читается при старте.
+    llm::Prompt expense_prompt;
 
     // Последний результат пробы LLM (фоновый поток в main.cpp, раз в
     // LLM_PROBE_INTERVAL_SECS). Читается хендлером /api/ai/status из потоков

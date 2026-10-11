@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <fstream>
+#include <sstream>
+#include <stdexcept>
 
 #include "httplib.h"
 
@@ -91,27 +94,10 @@ std::string recent_days(const std::string& today) {
     return out;
 }
 
-std::string system_prompt(const ExpenseRequest& r) {
-    std::string wallets;
-    for (const auto& [name, iso] : r.wallets) {
-        if (!wallets.empty()) wallets += ", ";
-        wallets += name + " (" + iso + ")";
+void replace_all(std::string& s, const std::string& from, const std::string& to) {
+    for (std::size_t pos = s.find(from); pos != std::string::npos; pos = s.find(from, pos + to.size())) {
+        s.replace(pos, from.size(), to);
     }
-    return "Ты разбираешь сообщение пользователя о трате. Ответ — только JSON по схеме.\n"
-           "Сегодня " + r.today + ", " + weekday_ru(r.today) + ". Прошедшие дни: " + recent_days(r.today) +
-           ". День недели («в пятницу») — дата из этого списка, никогда не будущая. Дата без года — " +
-           r.today.substr(0, 4) + " год: «24.09» → " + r.today.substr(0, 4) +
-           "-09-24. Дата не названа — date пустой.\n"
-           "Категории: " + (r.categories.empty() ? "(нет)" : join(r.categories)) + ".\n"
-           "Кошельки: " + (wallets.empty() ? "(нет)" : wallets) + ".\n"
-           "category — ближайшая по смыслу категория из списка (кофе, обед → кафе; такси → транспорт). "
-           "Подходящей нет — пусто. Не придумывай имён.\n"
-           "wallet — кошелёк, если он назван или однозначно следует из валюты; иначе пусто.\n"
-           "amount — число из сообщения, без пробелов внутри; не считай и не складывай. "
-           "Суммы нет — amount пустой.\n"
-           "currency — ISO-код, если валюта названа («евро», «$», «₽»); иначе пусто.\n"
-           "comment — что осталось от описания траты, без суммы, даты и кошелька.\n"
-           "confidence — уверенность в разборе от 0 до 1.";
 }
 
 json shot_answer(const std::string& amount, const std::string& currency, const std::string& category,
@@ -191,9 +177,59 @@ std::string strip_think(const std::string& content) {
     return s.substr(first, last - first + 1);
 }
 
-json expense_request_body(const ExpenseRequest& r, const std::string& model, const CallOptions& opts) {
+Prompt parse_prompt(const std::string& content) {
+    static const std::string kVersionTag = "# version:";
+    Prompt p;
+    std::istringstream in(content);
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.rfind(kVersionTag, 0) == 0) {
+            p.version = strip_think(line.substr(kVersionTag.size())); // strip_think заодно обрезает пробелы
+            continue;
+        }
+        if (!line.empty() && line[0] == '#') continue;
+        if (!p.text.empty()) p.text += "\n";
+        p.text += line;
+    }
+    p.text = strip_think(p.text);
+    if (p.version.empty()) throw std::runtime_error("в промпте нет строки \"# version: ...\"");
+    if (p.text.empty()) throw std::runtime_error("промпт пустой");
+    return p;
+}
+
+Prompt load_prompt(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) throw std::runtime_error("не найден файл промпта: " + path);
+    std::ostringstream buf;
+    buf << f.rdbuf();
+    try {
+        return parse_prompt(buf.str());
+    } catch (const std::exception& e) {
+        throw std::runtime_error(path + ": " + e.what());
+    }
+}
+
+std::string render_system_prompt(const Prompt& prompt, const ExpenseRequest& r) {
+    std::string wallets;
+    for (const auto& [name, iso] : r.wallets) {
+        if (!wallets.empty()) wallets += ", ";
+        wallets += name + " (" + iso + ")";
+    }
+    std::string s = prompt.text;
+    replace_all(s, "{today}", r.today);
+    replace_all(s, "{weekday}", weekday_ru(r.today));
+    replace_all(s, "{recent_days}", recent_days(r.today));
+    replace_all(s, "{year}", r.today.size() >= 4 ? r.today.substr(0, 4) : "");
+    replace_all(s, "{categories}", r.categories.empty() ? "(нет)" : join(r.categories));
+    replace_all(s, "{wallets}", wallets.empty() ? "(нет)" : wallets);
+    return s;
+}
+
+json expense_request_body(const ExpenseRequest& r, const Prompt& prompt, const std::string& model,
+                          const CallOptions& opts) {
     json messages = json::array();
-    messages.push_back({{"role", "system"}, {"content", system_prompt(r)}});
+    messages.push_back({{"role", "system"}, {"content", render_system_prompt(prompt, r)}});
     for (const auto& [text, answer] : shots(r)) {
         messages.push_back({{"role", "user"}, {"content", text}});
         messages.push_back({{"role", "assistant"}, {"content", answer.dump()}});
@@ -296,7 +332,10 @@ namespace {
 
 class HttpClient : public Client {
 public:
-    explicit HttpClient(Config cfg) : cfg_(std::move(cfg)), base_(split_base_url(cfg_.url)) {}
+    HttpClient(Config cfg, Prompt prompt)
+        : cfg_(std::move(cfg)), prompt_(std::move(prompt)), base_(split_base_url(cfg_.url)) {}
+
+    const std::string& prompt_version() const override { return prompt_.version; }
 
     Result extract_expense(const ExpenseRequest& req, const CallOptions& opts) override {
         auto started = std::chrono::steady_clock::now();
@@ -322,7 +361,7 @@ private:
         if (!cfg_.api_key.empty()) headers.emplace("Authorization", "Bearer " + cfg_.api_key);
 
         auto res = cli.Post(base_.path + "/chat/completions", headers,
-                            expense_request_body(req, cfg_.model, opts).dump(), "application/json");
+                            expense_request_body(req, prompt_, cfg_.model, opts).dump(), "application/json");
         if (!res) {
             auto err = res.error();
             r.status = (err == httplib::Error::Read || err == httplib::Error::Timeout) ? Status::Timeout
@@ -334,11 +373,14 @@ private:
     }
 
     Config cfg_;
+    Prompt prompt_;
     BaseUrl base_;
 };
 
 } // namespace
 
-std::unique_ptr<Client> make_http_client(const Config& cfg) { return std::make_unique<HttpClient>(cfg); }
+std::unique_ptr<Client> make_http_client(const Config& cfg, Prompt prompt) {
+    return std::make_unique<HttpClient>(cfg, std::move(prompt));
+}
 
 } // namespace llm

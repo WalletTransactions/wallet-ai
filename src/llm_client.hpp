@@ -18,12 +18,19 @@
 
 namespace llm {
 
-// Версия промпта — в логи и в eval (шаг 10 плана бота): сравнивать модели и
-// промпты как baseline/current. Меняете промпт или примеры — поднимайте.
-// v2: календарь последних 7 дней в system — модель выбирает дату из списка,
-// а не считает дни недели (v1 на «в пятницу» отвечала то прошлой, то
-// следующей пятницей).
-inline constexpr const char* kPromptVersion = "expense-v2";
+// System-промпт — файл prompts/expense.txt (читается при старте, см. его
+// шапку): строки с # — комментарии, "# version: X" — версия для логов и
+// eval, {today} {weekday} {recent_days} {year} {categories} {wallets} —
+// подстановки.
+struct Prompt {
+    std::string version;
+    std::string text; // без комментариев, с подстановками {…}
+};
+
+// Чистая функция; нет версии или текста — std::runtime_error.
+Prompt parse_prompt(const std::string& content);
+// Читает файл; нет файла — std::runtime_error.
+Prompt load_prompt(const std::string& path);
 
 // Что модель извлекла из текста. Строки как есть.
 struct Extraction {
@@ -79,10 +86,14 @@ struct Result {
     int reasoning_tokens = 0;
 };
 
+// System-промпт с подставленными датами и именами пользователя.
+std::string render_system_prompt(const Prompt& prompt, const ExpenseRequest& r);
+
 // Тело POST /chat/completions — чистая функция. Текст пользователя — только в
 // последнем user-сообщении, не в system: «игнорируй инструкции …» остаётся
 // данными.
-nlohmann::json expense_request_body(const ExpenseRequest& r, const std::string& model, const CallOptions& opts);
+nlohmann::json expense_request_body(const ExpenseRequest& r, const Prompt& prompt, const std::string& model,
+                                    const CallOptions& opts);
 
 // Разбор ответа — чистая функция (seconds не заполняет).
 Result parse_expense_response(int http_status, const std::string& body);
@@ -101,8 +112,10 @@ class Client {
 public:
     virtual ~Client() = default;
     virtual Result extract_expense(const ExpenseRequest& r, const CallOptions& opts) = 0;
+    // Версия промпта, с которым клиент ходит в LLM, — для логов и eval.
+    virtual const std::string& prompt_version() const = 0;
 };
 
-std::unique_ptr<Client> make_http_client(const Config& cfg);
+std::unique_ptr<Client> make_http_client(const Config& cfg, Prompt prompt);
 
 } // namespace llm

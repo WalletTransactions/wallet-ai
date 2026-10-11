@@ -106,6 +106,16 @@ int main() {
         applog::error("LLM_URL должен быть вида http://host:port/v1, получено: " + state.llm.url);
         return 1;
     }
+    // Промпты — файлы рядом с исполняемым файлом (как openapi.yaml): правка
+    // без пересборки, нужен рестарт. Нет файла — не стартуем: без промпта
+    // сервис бесполезен, а молча работать на чём-то ещё хуже.
+    std::string prompt_dir = strip_trailing_slash(env_or("LLM_PROMPT_DIR", "prompts"));
+    try {
+        state.expense_prompt = llm::load_prompt(prompt_dir + "/expense.txt");
+    } catch (const std::exception& e) {
+        applog::error(e.what());
+        return 1;
+    }
     int probe_interval_secs = std::stoi(env_or("LLM_PROBE_INTERVAL_SECS", "60"));
     if (probe_interval_secs < 1) probe_interval_secs = 60;
 
@@ -158,7 +168,8 @@ int main() {
 
     applog::info("wallet-ai v" + std::string(version::kVersion) + " (" + std::string(version::kGitCommit) +
                  ") listening on http://" + host + ":" + std::to_string(port) + " (auth-сервис: " + auth_service_url +
-                 ", LLM: " + (state.llm.url.empty() ? "выключена" : state.llm.url + " / " + state.llm.model) + ")");
+                 ", LLM: " + (state.llm.url.empty() ? "выключена" : state.llm.url + " / " + state.llm.model) +
+                 ", промпт: " + state.expense_prompt.version + ")");
     if (!svr.listen(host, port)) {
         applog::error("не удалось запустить сервер на " + host + ":" + std::to_string(port) +
                       " (порт занят или недоступен?)");

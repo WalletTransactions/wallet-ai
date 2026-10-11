@@ -96,6 +96,12 @@ add_custom_command(TARGET wallet_ai POST_BUILD
 )
 add_custom_command(TARGET wallet_ai POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_SOURCE_DIR}/prompts
+            $<TARGET_FILE_DIR:wallet_ai>/prompts
+    COMMENT "Копирую prompts/ рядом с wallet_ai (читаются при старте, LLM_PROMPT_DIR)"
+)
+add_custom_command(TARGET wallet_ai POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
             ${CMAKE_SOURCE_DIR}/third_party/swagger-ui
             $<TARGET_FILE_DIR:wallet_ai>/vendor/swagger-ui
     COMMENT "Копирую вендоренный Swagger UI рядом с wallet_ai (GET /docs)"
