@@ -56,6 +56,15 @@ GPU и модель — на хосте, вне docker. Проверено 2026-
 с `google/gemma-4-e4b` (детали — «Шаг 9 подробно» в
 `org/docs/TODO_telegram_bot.md`).
 
+Пункты 1–2 и проверку из п. 4 делает `bash wallet-ai/scripts/lms-load.sh`:
+запускает сервер на `0.0.0.0:1234`, если он не запущен, грузит модель под id
+`wallet-parse`, если её нет, и проверяет `GET /v1/models`. Повторный запуск
+ничего не меняет. Другая модель или id — через переменные (`LMS_MODEL_KEY`,
+`LMS_IDENTIFIER`, ... — см. шапку скрипта); при включённом токене LM Studio —
+`LLM_API_KEY=... bash wallet-ai/scripts/lms-load.sh`.
+
+Вручную:
+
 1. Загрузить модель под стабильным id, без JIT:
    `lms load google/gemma-4-e4b --identifier wallet-parse --context-length 4096 --gpu max`.
    Авто-выгрузку по простою выключить.
