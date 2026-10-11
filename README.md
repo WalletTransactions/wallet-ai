@@ -76,6 +76,33 @@ GPU и модель — на хосте, вне docker. Проверено 2026-
 4. Проверка: `curl -H "Authorization: Bearer …" http://127.0.0.1:1234/v1/models`
    — в списке `wallet-parse`.
 
+## Разбор траты: `llm_client`
+
+`src/llm_client.{hpp,cpp}` — один вызов `POST {LLM_URL}/chat/completions`:
+`response_format: json_schema` (strict), категории и кошельки — `enum` из
+имён пользователя плюс `""` (llama.cpp превращает схему в грамматику — чужое
+имя модель вернуть не может), в system — сегодняшняя дата и календарь 7
+прошедших дней, три примера из имён пользователя, текст пользователя — только
+в последнем user-сообщении. Дедлайн — на весь запрос (`set_max_timeout`).
+Зовётся воркером задания `parse_expense` (шаг 3); проверки полей — там же.
+
+Ручная проверка против живой LLM — `wallet_ai_llm_try`
+(`-DWALLET_AI_BUILD_TOOLS=ON`, в образ не входит):
+
+```bash
+LLM_URL=http://127.0.0.1:1234/v1 LLM_MODEL=wallet-parse ./build/wallet_ai_llm_try \
+  --categories "Кафе,Продукты,Такси" --wallets "Тинькофф:RUB,Revolut:EUR" \
+  --today 2026-10-11 [--reasoning none] [--max-tokens 512] "вчера такси 450" "12 евро обед"
+# --dump-body — напечатать тело запроса и выйти
+```
+
+Замечено на gemma-4-e4b (LM Studio, GTX 1070, 2026-10-11, промпт `expense-v2`):
+`reasoning_effort: "none"` рассуждения не выключает, а сокращает — 0–370
+токенов, 2–13 с на фразу, поэтому `max_tokens` 512; другие способы
+выключить (`low`, `minimal`, `chat_template_kwargs`) LM Studio игнорирует.
+Поля на пробных фразах верные, включая «в пятницу», «24.09», «12 евро» →
+Revolut. Выбор модели — eval (шаг 10 плана бота).
+
 ## Сборка
 
 ```bash

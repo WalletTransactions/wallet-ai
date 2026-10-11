@@ -1,0 +1,344 @@
+#include "llm_client.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+
+#include "httplib.h"
+
+using nlohmann::json;
+
+namespace llm {
+
+namespace {
+
+// Дни от 1970-01-01 и обратно — H. Hinnant, "chrono-Compatible Low-Level Date
+// Algorithms". <chrono> C++17 календаря не знает.
+long days_from_civil(int y, unsigned m, unsigned d) {
+    y -= m <= 2;
+    const int era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = static_cast<unsigned>(y - era * 400);
+    const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return static_cast<long>(era) * 146097 + static_cast<long>(doe) - 719468;
+}
+
+void civil_from_days(long z, int& y, unsigned& m, unsigned& d) {
+    z += 719468;
+    const long era = (z >= 0 ? z : z - 146096) / 146097;
+    const unsigned doe = static_cast<unsigned>(z - era * 146097);
+    const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const unsigned mp = (5 * doy + 2) / 153;
+    d = doy - (153 * mp + 2) / 5 + 1;
+    m = mp < 10 ? mp + 3 : mp - 9;
+    y = static_cast<int>(yoe) + static_cast<int>(era) * 400 + (m <= 2);
+}
+
+std::string join(const std::vector<std::string>& items) {
+    std::string out;
+    for (const auto& s : items) {
+        if (!out.empty()) out += ", ";
+        out += s;
+    }
+    return out;
+}
+
+json string_enum(const std::vector<std::string>& names) {
+    json values = json::array();
+    for (const auto& n : names) {
+        if (!n.empty() && std::find(values.begin(), values.end(), n) == values.end()) values.push_back(n);
+    }
+    values.push_back(""); // «не знаю» — всегда допустимо
+    return {{"type", "string"}, {"enum", values}};
+}
+
+json expense_schema(const ExpenseRequest& r) {
+    std::vector<std::string> wallet_names;
+    for (const auto& w : r.wallets) wallet_names.push_back(w.first);
+    return {
+        {"type", "object"},
+        {"additionalProperties", false},
+        {"required", {"amount", "currency", "category", "wallet", "date", "comment", "confidence"}},
+        {"properties",
+         {
+             {"amount", {{"type", "string"}, {"pattern", "^([0-9]+([.,][0-9]+)?)?$"}}},
+             {"currency", {{"type", "string"}, {"pattern", "^([A-Z]{3})?$"}}},
+             // enum, а не просьба в промпте: llama.cpp превращает схему в
+             // грамматику, и модель физически не может вернуть чужое имя.
+             {"category", string_enum(r.categories)},
+             {"wallet", string_enum(wallet_names)},
+             {"date", {{"type", "string"}, {"pattern", "^([0-9]{4}-[0-9]{2}-[0-9]{2})?$"}}},
+             {"comment", {{"type", "string"}}},
+             {"confidence", {{"type", "number"}, {"minimum", 0}, {"maximum", 1}}},
+         }},
+    };
+}
+
+// «вчера (суббота) 2026-10-10, позавчера (пятница) 2026-10-09, четверг
+// 2026-10-08, ...» — 7 прошедших дней: «в пятницу» модель берёт из списка.
+std::string recent_days(const std::string& today) {
+    std::string out;
+    for (int i = 1; i <= 7; ++i) {
+        std::string day = add_days(today, -i);
+        if (day.empty()) return {};
+        std::string label = weekday_ru(day);
+        if (i == 1) label = "вчера (" + label + ")";
+        if (i == 2) label = "позавчера (" + label + ")";
+        if (!out.empty()) out += ", ";
+        out += label + " " + day;
+    }
+    return out;
+}
+
+std::string system_prompt(const ExpenseRequest& r) {
+    std::string wallets;
+    for (const auto& [name, iso] : r.wallets) {
+        if (!wallets.empty()) wallets += ", ";
+        wallets += name + " (" + iso + ")";
+    }
+    return "Ты разбираешь сообщение пользователя о трате. Ответ — только JSON по схеме.\n"
+           "Сегодня " + r.today + ", " + weekday_ru(r.today) + ". Прошедшие дни: " + recent_days(r.today) +
+           ". День недели («в пятницу») — дата из этого списка, никогда не будущая. Дата без года — " +
+           r.today.substr(0, 4) + " год: «24.09» → " + r.today.substr(0, 4) +
+           "-09-24. Дата не названа — date пустой.\n"
+           "Категории: " + (r.categories.empty() ? "(нет)" : join(r.categories)) + ".\n"
+           "Кошельки: " + (wallets.empty() ? "(нет)" : wallets) + ".\n"
+           "category — ближайшая по смыслу категория из списка (кофе, обед → кафе; такси → транспорт). "
+           "Подходящей нет — пусто. Не придумывай имён.\n"
+           "wallet — кошелёк, если он назван или однозначно следует из валюты; иначе пусто.\n"
+           "amount — число из сообщения, без пробелов внутри; не считай и не складывай. "
+           "Суммы нет — amount пустой.\n"
+           "currency — ISO-код, если валюта названа («евро», «$», «₽»); иначе пусто.\n"
+           "comment — что осталось от описания траты, без суммы, даты и кошелька.\n"
+           "confidence — уверенность в разборе от 0 до 1.";
+}
+
+json shot_answer(const std::string& amount, const std::string& currency, const std::string& category,
+                 const std::string& wallet, const std::string& date, const std::string& comment, double confidence) {
+    return {{"amount", amount},     {"currency", currency}, {"category", category}, {"wallet", wallet},
+            {"date", date},         {"comment", comment},   {"confidence", confidence}};
+}
+
+// Примеры строятся из имён ЭТОГО пользователя: ответ примера обязан
+// проходить ту же схему (enum), иначе модель учится на невозможном ответе.
+// Смысловое сопоставление («кофе» → «Кафе») — из system, примеры учат форме:
+// сумма без пробелов, относительная дата, кошелёк, «не трата».
+std::vector<std::pair<std::string, json>> shots(const ExpenseRequest& r) {
+    std::string cat0 = r.categories.empty() ? "" : r.categories[0];
+    std::string cat1 = r.categories.size() > 1 ? r.categories[1] : cat0;
+    std::string wallet0 = r.wallets.empty() ? "" : r.wallets[0].first;
+    std::string two_days_ago = add_days(r.today, -2);
+
+    std::vector<std::pair<std::string, json>> out;
+    out.push_back({(cat0.empty() ? std::string("покупка") : cat0) + " 200",
+                   shot_answer("200", "", cat0, "", "", cat0.empty() ? "покупка" : "", 0.9)});
+    std::string text2 = "позавчера 1 340,50 " + (cat1.empty() ? std::string("разное") : cat1) +
+                        (wallet0.empty() ? "" : " с " + wallet0);
+    out.push_back({text2, shot_answer("1340,50", "", cat1, wallet0, two_days_ago, cat1.empty() ? "разное" : "", 0.9)});
+    out.push_back({"привет, как дела", shot_answer("", "", "", "", "", "", 0.9)});
+    return out;
+}
+
+bool is_string_field(const json& j, const char* key) { return j.contains(key) && j.at(key).is_string(); }
+
+} // namespace
+
+const char* to_string(Status s) {
+    switch (s) {
+    case Status::Ok: return "ok";
+    case Status::NotExpense: return "not_expense";
+    case Status::Timeout: return "timeout";
+    case Status::Unavailable: return "unavailable";
+    case Status::Unauthorized: return "unauthorized";
+    case Status::ModelNotLoaded: return "model_not_loaded";
+    case Status::BadResponse: return "bad_response";
+    }
+    return "unknown";
+}
+
+std::string add_days(const std::string& ymd, int days) {
+    int y = 0;
+    unsigned m = 0;
+    unsigned d = 0;
+    if (ymd.size() != 10 || std::sscanf(ymd.c_str(), "%4d-%2u-%2u", &y, &m, &d) != 3) return {};
+    if (m < 1 || m > 12 || d < 1 || d > 31) return {};
+    civil_from_days(days_from_civil(y, m, d) + days, y, m, d);
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%04d-%02u-%02u", y, m, d);
+    return buf;
+}
+
+std::string weekday_ru(const std::string& ymd) {
+    static const char* kNames[] = {"четверг", "пятница", "суббота", "воскресенье",
+                                   "понедельник", "вторник", "среда"}; // 1970-01-01 — четверг
+    int y = 0;
+    unsigned m = 0;
+    unsigned d = 0;
+    if (ymd.size() != 10 || std::sscanf(ymd.c_str(), "%4d-%2u-%2u", &y, &m, &d) != 3) return {};
+    if (m < 1 || m > 12 || d < 1 || d > 31) return {};
+    long days = days_from_civil(y, m, d);
+    return kNames[((days % 7) + 7) % 7];
+}
+
+std::string strip_think(const std::string& content) {
+    std::string s = content;
+    auto end = s.find("</think>");
+    if (s.find("<think>") != std::string::npos && end != std::string::npos) s = s.substr(end + 8);
+    auto first = s.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return {};
+    auto last = s.find_last_not_of(" \t\r\n");
+    return s.substr(first, last - first + 1);
+}
+
+json expense_request_body(const ExpenseRequest& r, const std::string& model, const CallOptions& opts) {
+    json messages = json::array();
+    messages.push_back({{"role", "system"}, {"content", system_prompt(r)}});
+    for (const auto& [text, answer] : shots(r)) {
+        messages.push_back({{"role", "user"}, {"content", text}});
+        messages.push_back({{"role", "assistant"}, {"content", answer.dump()}});
+    }
+    messages.push_back({{"role", "user"}, {"content", r.text}});
+
+    json body = {
+        {"model", model},
+        {"temperature", 0},
+        {"max_tokens", opts.max_tokens},
+        {"stream", false},
+        {"messages", messages},
+        {"response_format",
+         {{"type", "json_schema"}, {"json_schema", {{"name", "expense"}, {"strict", true}, {"schema", expense_schema(r)}}}}},
+    };
+    if (!opts.reasoning_effort.empty()) body["reasoning_effort"] = opts.reasoning_effort;
+    return body;
+}
+
+Result parse_expense_response(int http_status, const std::string& body) {
+    Result r;
+    if (http_status == 401 || http_status == 403) {
+        r.status = Status::Unauthorized;
+        return r;
+    }
+    if (http_status == 404) {
+        r.status = Status::ModelNotLoaded;
+        return r;
+    }
+    if (http_status == 400) {
+        r.status = Status::BadResponse;
+        r.detail = "http_400";
+        return r;
+    }
+    if (http_status < 200 || http_status >= 300) {
+        r.status = Status::Unavailable;
+        r.detail = "http_" + std::to_string(http_status);
+        return r;
+    }
+
+    r.status = Status::BadResponse;
+    json resp;
+    try {
+        resp = json::parse(body);
+    } catch (const std::exception&) {
+        r.detail = "response_not_json";
+        return r;
+    }
+    if (resp.contains("usage") && resp["usage"].is_object()) {
+        const auto& u = resp["usage"];
+        r.completion_tokens = u.value("completion_tokens", 0);
+        if (u.contains("completion_tokens_details") && u["completion_tokens_details"].is_object()) {
+            r.reasoning_tokens = u["completion_tokens_details"].value("reasoning_tokens", 0);
+        }
+    }
+    if (!resp.contains("choices") || !resp["choices"].is_array() || resp["choices"].empty()) {
+        r.detail = "no_choices";
+        return r;
+    }
+    const auto& choice = resp["choices"][0];
+    if (choice.value("finish_reason", std::string{}) == "length") {
+        r.detail = "finish_reason_length"; // JSON оборван — max_tokens съели рассуждения?
+        return r;
+    }
+    if (!choice.contains("message") || !choice["message"].contains("content") || !choice["message"]["content"].is_string()) {
+        r.detail = "no_content";
+        return r;
+    }
+    // reasoning_content (так LM Studio отдаёт рассуждения) не нужен.
+    json e;
+    try {
+        e = json::parse(strip_think(choice["message"]["content"].get<std::string>()));
+    } catch (const std::exception&) {
+        r.detail = "content_not_json";
+        return r;
+    }
+    for (const char* key : {"amount", "currency", "category", "wallet", "date", "comment"}) {
+        if (!is_string_field(e, key)) {
+            r.detail = std::string("schema_") + key;
+            return r;
+        }
+    }
+    if (!e.contains("confidence") || !e["confidence"].is_number()) {
+        r.detail = "schema_confidence";
+        return r;
+    }
+
+    r.extraction.amount = e["amount"].get<std::string>();
+    r.extraction.currency = e["currency"].get<std::string>();
+    r.extraction.category = e["category"].get<std::string>();
+    r.extraction.wallet = e["wallet"].get<std::string>();
+    r.extraction.date = e["date"].get<std::string>();
+    r.extraction.comment = e["comment"].get<std::string>();
+    r.extraction.confidence = e["confidence"].get<double>();
+    r.status = r.extraction.amount.empty() ? Status::NotExpense : Status::Ok;
+    return r;
+}
+
+namespace {
+
+class HttpClient : public Client {
+public:
+    explicit HttpClient(Config cfg) : cfg_(std::move(cfg)), base_(split_base_url(cfg_.url)) {}
+
+    Result extract_expense(const ExpenseRequest& req, const CallOptions& opts) override {
+        auto started = std::chrono::steady_clock::now();
+        Result r = call(req, opts);
+        r.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        return r;
+    }
+
+private:
+    Result call(const ExpenseRequest& req, const CallOptions& opts) {
+        Result r;
+        if (cfg_.url.empty() || base_.origin.empty()) {
+            r.status = Status::Unavailable;
+            r.detail = "llm_disabled";
+            return r;
+        }
+        // Клиент на вызов: вызовы редкие и долгие, держать соединение незачем.
+        httplib::Client cli(base_.origin);
+        cli.set_connection_timeout(2, 0);
+        cli.set_read_timeout(opts.timeout_ms / 1000, (opts.timeout_ms % 1000) * 1000);
+        cli.set_max_timeout(opts.timeout_ms); // дедлайн на весь запрос
+        httplib::Headers headers;
+        if (!cfg_.api_key.empty()) headers.emplace("Authorization", "Bearer " + cfg_.api_key);
+
+        auto res = cli.Post(base_.path + "/chat/completions", headers,
+                            expense_request_body(req, cfg_.model, opts).dump(), "application/json");
+        if (!res) {
+            auto err = res.error();
+            r.status = (err == httplib::Error::Read || err == httplib::Error::Timeout) ? Status::Timeout
+                                                                                       : Status::Unavailable;
+            r.detail = httplib::to_string(err);
+            return r;
+        }
+        return parse_expense_response(res->status, res->body);
+    }
+
+    Config cfg_;
+    BaseUrl base_;
+};
+
+} // namespace
+
+std::unique_ptr<Client> make_http_client(const Config& cfg) { return std::make_unique<HttpClient>(cfg); }
+
+} // namespace llm

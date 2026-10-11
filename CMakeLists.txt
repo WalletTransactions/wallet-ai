@@ -50,6 +50,7 @@ configure_file(
 add_library(wallet_ai_core STATIC
     src/access.cpp
     src/ai.cpp
+    src/llm_client.cpp
     src/llm_probe.cpp
     src/session.cpp
     ${WALLET_COMMON_DIR}/util/base64.cpp
@@ -107,4 +108,12 @@ option(WALLET_AI_BUILD_TESTS "Собирать юнит-тесты wallet_ai_tes
 if(WALLET_AI_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+# wallet_ai_llm_try — ручная проверка разбора траты против живой LLM
+# (подбор промпта и модели), см. tools/llm_try.cpp. В образ не входит.
+option(WALLET_AI_BUILD_TOOLS "Собирать wallet_ai_llm_try" OFF)
+if(WALLET_AI_BUILD_TOOLS)
+    add_executable(wallet_ai_llm_try tools/llm_try.cpp)
+    target_link_libraries(wallet_ai_llm_try PRIVATE wallet_ai_core)
 endif()
