@@ -1,0 +1,11 @@
+build
+build-tests
+build-loadtest
+out
+logs
+.env
+.env.example
+Containerfile
+.dockerignore
+README.md
+.git

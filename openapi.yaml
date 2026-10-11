@@ -1,0 +1,160 @@
+openapi: 3.1.0
+info:
+  title: wallet-ai
+  version: "0.1.0"
+  description: |
+    Единая точка доступа к LLM (`org/docs/TODO_wallet_ai.md`): разбор трат
+    текстом, импорт выписок, чат с инструментами. **Ничего не пишет в
+    кошелёк** — возвращает черновики, запись делает клиент после
+    подтверждения пользователя.
+
+    Токен — access JWT google-auth: `aud` содержит `wallet-ai`, `scope` —
+    `ai:use`. Токен без `aud` (старого формата) не принимается.
+
+    Через `wallet-gateway` (порт 8090) — префикс `/api/ai/*`; бот ходит
+    напрямую. Ниже — прямой адрес сервиса.
+servers:
+  - url: http://localhost:8087
+    description: Прямой адрес сервиса (по умолчанию, см. .env.example — PORT)
+
+tags:
+  - name: ai
+    description: LLM-функции
+  - name: docs
+    description: "Эта спека, Swagger UI, healthcheck, метрики, версия — не часть API"
+
+security:
+  - bearerAuth: []
+  - sessionCookie: []
+
+paths:
+  /api/ai/status:
+    get:
+      operationId: aiStatus
+      summary: Включён ли ИИ и что он умеет
+      description: |
+        Веб по `enabled` показывает или прячет пункт «ИИ», бот — строку про
+        свободный текст в `/help`. `enabled` — LLM настроена (`LLM_URL`) и
+        последняя проба (`GET {LLM_URL}/models`, раз в
+        `LLM_PROBE_INTERVAL_SECS`) нашла модель `LLM_MODEL`.
+      tags: [ai]
+      responses:
+        "200":
+          description: Состояние
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [enabled, model, reason, features]
+                properties:
+                  enabled: {type: boolean}
+                  model:
+                    type: [string, "null"]
+                    description: id модели; null, если ИИ выключен
+                    example: wallet-parse
+                  reason:
+                    type: [string, "null"]
+                    description: почему выключен; null, если включён
+                    enum: [disabled, unreachable, unauthorized, model_not_loaded, bad_response, null]
+                  features:
+                    type: array
+                    description: что умеет сервис (пусто до шага 3 — parse_expense)
+                    items: {type: string}
+        "401":
+          description: Нет токена, подпись не сошлась, токен просрочен, выпущен не для wallet-ai или старого формата
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "403":
+          description: В токене нет scope `ai:use`
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+
+  /docs:
+    get:
+      operationId: docs
+      summary: "Swagger UI поверх /openapi.yaml"
+      tags: [docs]
+      security: []
+      responses:
+        "200":
+          description: HTML-страница Swagger UI
+          content:
+            text/html: {schema: {type: string}}
+
+  /openapi.yaml:
+    get:
+      operationId: openApiYaml
+      summary: "Эта спецификация"
+      tags: [docs]
+      security: []
+      responses:
+        "200":
+          description: Текст этого файла
+          content:
+            application/yaml: {schema: {type: string}}
+
+  /healthz:
+    get:
+      operationId: healthz
+      summary: "Liveness для compose healthcheck — LLM не проверяет (она необязательна)"
+      tags: [docs]
+      security: []
+      responses:
+        "200":
+          description: Сервис жив
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string, example: ok}
+
+  /metrics:
+    get:
+      operationId: metrics
+      summary: "Prometheus: http-метрики, jwt_claims_total, llm_up"
+      tags: [docs]
+      security: []
+      responses:
+        "200":
+          description: Текстовый формат Prometheus
+          content:
+            text/plain: {schema: {type: string}}
+
+  /version:
+    get:
+      operationId: version
+      summary: "Версия этого билда (VERSION + git-хэш)"
+      tags: [docs]
+      security: []
+      responses:
+        "200":
+          description: Версия и git-хэш
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  service: {type: string, example: wallet-ai}
+                  version: {type: string, example: "0.1.0"}
+                  git_commit: {type: string, example: "a1b2c3d4"}
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "Access-токен google-auth (aud wallet-ai, scope ai:use), проверяется по JWKS."
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: session
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: {type: string}

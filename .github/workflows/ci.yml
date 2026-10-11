@@ -1,0 +1,55 @@
+# Сборка и юнит-тесты на каждый push в main и на pull request — тот же
+# шаблон, что у остальных сервисов (org/docs/TODO_ci.md, шаг 1).
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md"]
+  pull_request:
+    paths-ignore: ["**.md"]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    # Тот же базовый образ, что build-стадия Containerfile.
+    container: debian:bookworm-slim
+    timeout-minutes: 20
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+              build-essential cmake libssl-dev pkg-config \
+              git ca-certificates
+
+      - uses: actions/checkout@v5
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DWALLET_AI_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  docker-image:
+    name: Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      # Только проверка, что образ собирается; никуда не публикуется.
+      - name: Build image
+        run: |
+          docker build \
+              --build-arg GIT_COMMIT="$(git rev-parse --short=8 HEAD)" \
+              -f Containerfile -t wallet-ai:ci .

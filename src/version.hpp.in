@@ -1,0 +1,9 @@
+#pragma once
+
+// Сгенерировано CMake (см. CMakeLists.txt, "Версия") из VERSION + git-хэша на
+// момент configure — сам version.hpp не коммитится, только этот шаблон.
+namespace version {
+constexpr const char* kService = "wallet-ai";
+constexpr const char* kVersion = "@APP_VERSION@";
+constexpr const char* kGitCommit = "@GIT_COMMIT@";
+}  // namespace version
