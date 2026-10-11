@@ -71,6 +71,110 @@ paths:
             application/json:
               schema: {$ref: "#/components/schemas/Error"}
 
+  /api/ai/jobs:
+    post:
+      operationId: createJob
+      summary: Создать задание к LLM (асинхронно)
+      description: |
+        Всё, что зовёт LLM, — задания: модель думает столько, сколько нужно
+        виду задания, клиент забирает результат long-poll'ом
+        (`GET /api/ai/jobs/{id}?wait=25`). Справочник счетов берётся токеном
+        пользователя в момент создания.
+
+        Виды (`kind`): пока только `parse_expense` — трата свободным текстом
+        в проверенный черновик. Запись черновика — дело клиента
+        (`POST /sync/push` в wallet-api) после подтверждения пользователем.
+
+        `idempotency_key` — повтор с тем же ключом от того же пользователя
+        возвращает то же задание без нового запуска LLM (бот:
+        `tg:<tg_user_id>:<update_id>`).
+      tags: [ai]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, input]
+              properties:
+                kind: {type: string, enum: [parse_expense]}
+                idempotency_key: {type: string}
+                input:
+                  type: object
+                  required: [text, now]
+                  properties:
+                    text: {type: string, maxLength: 500, example: "вчера такси 450 с тинькоффа"}
+                    now:
+                      type: object
+                      description: Сейчас в поясе пользователя — от него считаются «вчера», «в пятницу»
+                      required: [date, time]
+                      properties:
+                        date: {type: string, example: "2026-10-11"}
+                        time: {type: string, example: "14:05:00"}
+                    default_wallet_uuid: {type: string, description: Кошелёк по умолчанию, если кошелёк не назван}
+      responses:
+        "202":
+          description: Задание создано (или найдено по idempotency_key)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id: {type: string, format: uuid}
+                  status: {type: string, enum: [queued, running, done, failed, cancelled]}
+        "400":
+          description: Неизвестный kind или неверный input
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "401":
+          description: Нет токена / не для wallet-ai / wallet-report не принял токен
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "403":
+          description: Нет scope `ai:use`
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "429":
+          description: "`busy` — очередь полна, `rate_limited` — больше LLM_MAX_PER_MINUTE за минуту, `too_many_active` — больше AI_MAX_ACTIVE_PER_USER незавершённых"
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "502":
+          description: wallet-report недоступен
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "503":
+          description: "`unavailable` — ИИ выключен или LLM не отвечает; клиент уходит на строгий формат"
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+
+  /api/ai/jobs/{id}:
+    parameters:
+      - {in: path, name: id, required: true, schema: {type: string, format: uuid}}
+    get:
+      operationId: getJob
+      summary: Статус и результат задания (long-poll)
+      description: |
+        `wait` (0–25 с) — держать запрос, пока задание не завершится, но не
+        дольше `wait`. Не готово — `200` со `status: queued/running`, клиент
+        повторяет. Завершённое задание хранится `AI_JOB_TTL_SECS` (10 мин),
+        потом — 404.
+      tags: [ai]
+      parameters:
+        - {in: query, name: wait, schema: {type: integer, minimum: 0, maximum: 25, default: 0}}
+      responses:
+        "200":
+          description: Снимок задания
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Job"}
+        "404":
+          description: Нет, истекло или чужое (не 403 — не выдаём, что такой id есть)
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+    delete:
+      operationId: cancelJob
+      summary: Отменить задание
+      description: Ещё в очереди — снимается; выполняется — сразу `cancelled`, результат генерации выбрасывается.
+      tags: [ai]
+      responses:
+        "204": {description: Отменено}
+        "404":
+          description: Нет, истекло, чужое или уже завершено
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+
   /docs:
     get:
       operationId: docs
@@ -158,3 +262,91 @@ components:
       type: object
       properties:
         error: {type: string}
+
+    Job:
+      type: object
+      required: [job_id, kind, status]
+      properties:
+        job_id: {type: string, format: uuid}
+        kind: {type: string, example: parse_expense}
+        status: {type: string, enum: [queued, running, done, failed, cancelled]}
+        queue_ms: {type: integer, description: Сколько ждало в очереди}
+        run_ms: {type: integer, description: Сколько выполнялось}
+        failure:
+          type: string
+          description: При failed
+          enum: [timeout, unavailable, bad_response, internal]
+        result:
+          description: При done; для parse_expense — ParseExpenseResult
+          $ref: "#/components/schemas/ParseExpenseResult"
+
+    ParseExpenseResult:
+      type: object
+      required: [outcome, prompt_version]
+      properties:
+        outcome:
+          type: string
+          enum: [draft, not_expense, rejected]
+          description: |
+            draft — черновик (expense + resolution); not_expense — модель не
+            нашла трату; rejected — проверки не прошли (reasons), клиент
+            предлагает строгий формат.
+        prompt_version: {type: string, example: expense-v2}
+        confidence: {type: number}
+        reasons:
+          type: array
+          description: При rejected
+          items: {type: string, enum: [bad_amount, zero_amount, amount_not_in_text, bad_date, future_date, too_old]}
+        notes:
+          type: array
+          description: При draft — что поправлено (currency_dropped, comment_truncated)
+          items: {type: string}
+        expense:
+          type: object
+          description: Тот же ParsedExpense, что у строгого формата бота
+          properties:
+            amount: {type: string, example: "1200.5"}
+            fraction_digits: {type: integer}
+            currency_hint: {type: string, example: EUR}
+            category: {type: string, description: имя из справочника или пусто}
+            wallet: {type: string}
+            datetime: {type: string, example: "2026-10-10 12:00:00"}
+            comment: {type: string}
+        resolution:
+          type: object
+          description: Решение resolver — какие счета (uuid) или кого спросить
+          properties:
+            category:
+              type: object
+              properties:
+                kind: {type: string, enum: [found, ask]}
+                why: {type: string, enum: [none, missing, not_found, ambiguous]}
+                found: {$ref: "#/components/schemas/Named"}
+                candidates: {type: array, items: {$ref: "#/components/schemas/Named"}}
+            wallet:
+              type: object
+              properties:
+                kind: {type: string, enum: [found, ask, reject]}
+                why:
+                  type: string
+                  enum: [none, not_given, not_found, ambiguous, currency_mismatch, no_wallet_in_currency, no_wallets]
+                by_currency: {type: boolean, description: выбран по валюте из текста — назвать в карточке}
+                offer_remember: {type: boolean}
+                found: {$ref: "#/components/schemas/Wallet"}
+                force: {$ref: "#/components/schemas/Wallet"}
+                candidates: {type: array, items: {$ref: "#/components/schemas/Wallet"}}
+
+    Named:
+      type: object
+      properties:
+        uuid: {type: string}
+        name: {type: string}
+
+    Wallet:
+      type: object
+      properties:
+        uuid: {type: string}
+        name: {type: string}
+        iso_code: {type: string}
+        symbol: {type: string}
+        precision: {type: integer}

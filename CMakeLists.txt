@@ -50,9 +50,16 @@ configure_file(
 add_library(wallet_ai_core STATIC
     src/access.cpp
     src/ai.cpp
+    src/expense_check.cpp
+    src/jobs.cpp
     src/llm_client.cpp
     src/llm_probe.cpp
+    src/parse_expense.cpp
     src/session.cpp
+    ${WALLET_COMMON_DIR}/expense/resolver.cpp
+    ${WALLET_COMMON_DIR}/expense/strict.cpp
+    ${WALLET_COMMON_DIR}/expense/text.cpp
+    ${WALLET_COMMON_DIR}/clients/reports_client.cpp
     ${WALLET_COMMON_DIR}/util/base64.cpp
     ${WALLET_COMMON_DIR}/util/crypto.cpp
     ${WALLET_COMMON_DIR}/util/dotenv.cpp
@@ -61,6 +68,7 @@ add_library(wallet_ai_core STATIC
     ${WALLET_COMMON_DIR}/util/jwt_claims.cpp
     ${WALLET_COMMON_DIR}/util/log.cpp
     ${WALLET_COMMON_DIR}/util/metrics.cpp
+    ${WALLET_COMMON_DIR}/util/uuid.cpp
 )
 target_include_directories(wallet_ai_core PUBLIC
     ${CMAKE_SOURCE_DIR}/src

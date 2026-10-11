@@ -6,9 +6,10 @@
 // читает данные токеном пользователя; запись делает клиент после
 // подтверждения. Токены не выпускает — только проверяет по JWKS google-auth.
 //
-// Шаг 1: каркас, проверка токена (aud wallet-ai, scope ai:use),
-// GET /api/ai/status и фоновая проба LLM.
+// Каркас, проверка токена (aud wallet-ai, scope ai:use), GET /api/ai/status,
+// фоновая проба LLM; задания (/api/ai/jobs) и их воркеры — шаг 3.
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <memory>
@@ -118,6 +119,36 @@ int main() {
     }
     int probe_interval_secs = std::stoi(env_or("LLM_PROBE_INTERVAL_SECS", "60"));
     if (probe_interval_secs < 1) probe_interval_secs = 60;
+
+    state.reports = reports::make_http_api(
+        strip_trailing_slash(env_required("WALLET_REPORT_URL", "адрес wallet-report, например http://127.0.0.1:8084")),
+        "ai_reports_errors_total");
+    state.llm_client = llm::make_http_client(state.llm, state.expense_prompt);
+
+    // Вид задания parse_expense (TODO_wallet_ai.md, §3, §5): сколько думать,
+    // запас токенов под рассуждения, дедлайн генерации.
+    state.parse_expense_opts.reasoning_effort = env_or("LLM_REASONING_PARSE_EXPENSE", "none");
+    if (state.parse_expense_opts.reasoning_effort == "default") state.parse_expense_opts.reasoning_effort.clear();
+    state.parse_expense_opts.max_tokens = std::stoi(env_or("LLM_MAX_TOKENS_PARSE_EXPENSE", "512"));
+    state.parse_expense_opts.timeout_ms = std::stoi(env_or("AI_JOB_TIMEOUT_SECS_PARSE_EXPENSE", "60")) * 1000;
+
+    jobs::Limits limits;
+    limits.max_queued_interactive = static_cast<std::size_t>(std::stoi(env_or("AI_QUEUE_MAX", "20")));
+    limits.max_active_per_user = static_cast<std::size_t>(std::stoi(env_or("AI_MAX_ACTIVE_PER_USER", "3")));
+    limits.max_per_minute = std::stoi(env_or("LLM_MAX_PER_MINUTE", "10"));
+    limits.ttl = std::chrono::seconds(std::stoi(env_or("AI_JOB_TTL_SECS", "600")));
+    state.jobs = std::make_unique<jobs::Store>(limits);
+
+    // Воркеры = одновременные запросы к GPU (§4): на одной видеокарте — 1.
+    int workers = std::max(1, std::stoi(env_or("LLM_MAX_CONCURRENT", "1")));
+    for (int i = 0; i < workers; ++i) std::thread([&state] { aiapi::run_worker(state); }).detach();
+    // Завершённые задания живут AI_JOB_TTL_SECS — потом удаляются.
+    std::thread([&state] {
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::seconds(30));
+            state.jobs->sweep();
+        }
+    }).detach();
 
     // Проба LLM: сразу при старте (LLM необязательна — недоступна, значит
     // status.enabled=false, сервис всё равно стартует) и дальше в фоне.
