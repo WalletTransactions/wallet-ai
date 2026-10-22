@@ -13,9 +13,9 @@ inline constexpr const char* kIssuer = "google-auth";
 
 enum class Result {
     Ok,
-    // Токен старого формата — без aud (выпущен до шага 1). Принимается с
-    // предупреждением до шага 3 (TODO_telegram_tokens.md), scope не
-    // проверяется: у таких токенов его нет, а права у них всегда были полные.
+    // Токен старого формата — без aud (выпущен до шага 1). С шага 3
+    // (TODO_telegram_tokens.md) все сервисы его отклоняют; отдельный
+    // результат — чтобы метрика и лог показывали, кто ещё с ним приходит.
     Legacy,
     WrongIssuer,
     WrongAudience,
