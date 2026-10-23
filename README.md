@@ -28,6 +28,13 @@ Telegram ─> wallet-telegram ─────────────> wallet-ai
 | POST | `/api/ai/jobs` | `{kind, input, idempotency_key?}` → `202 {job_id}`; ИИ выключен — `503` |
 | GET | `/api/ai/jobs/{id}?wait=N` | статус и результат; `wait` ≤ 25 с — long-poll |
 | DELETE | `/api/ai/jobs/{id}` | отменить |
+| POST | `/api/ai/imports` | выписка (текст или файл) и кошелёк → `202 {import_id}` |
+| GET | `/api/ai/imports`, `/api/ai/imports/{id}` | список; статус, прогресс, строки и группы |
+| DELETE | `/api/ai/imports/{id}` | отменить разбор и удалить |
+| POST | `/api/ai/imports/{id}/retry` | продолжить `failed` |
+| PATCH / POST | `/api/ai/imports/{id}/rows` | правки строк; строка из «не разобрано» |
+| POST | `/api/ai/imports/{id}/committed` | отметить записанные строки |
+| GET / PATCH / DELETE | `/api/ai/statement-profiles[/{id}]` | профили формата выписки |
 | GET | `/healthz`, `/metrics`, `/version`, `/docs`, `/openapi.yaml` | служебное, без токена |
 
 ### Задания
@@ -62,6 +69,40 @@ curl "$GW/api/ai/jobs/$ID?wait=25" -H "Authorization: Bearer $T"
 
 Полный контракт — [`openapi.yaml`](openapi.yaml), Swagger UI — `GET /docs`.
 
+### Импорт выписки
+
+Спецификация — `openspec/changes/add-statement-import`. Клиент — веб
+(«ИИ» → «Импорт выписки»), бот выписки не принимает.
+
+1. `POST /api/ai/imports {wallet_uuid, text | file, profile?}` — текст или
+   файл `.pdf` (с текстовым слоем, `pdftotext -layout`), `.csv`, `.txt`
+   (UTF-8 или Windows-1251) до 5 МБ в base64. Ответ сразу, разбор — в фоне.
+2. Текст режется на фрагменты (`AI_EXTRACT_CHUNK_CHARS`), каждый — фоновое
+   задание `extract_rows`: модель возвращает операции с номерами строк, код
+   проверяет, что сумма и дата буквально есть в этих строках
+   (`src/statement/verify.cpp`). Не прошла — `check`, строки с суммой без
+   операции — «не разобрано».
+3. Категории: правила пользователя (`merchant_rule`, растут из его правок),
+   затем `classify_rows` — только описания продавцов и имена категорий,
+   порог `AI_CLASSIFY_MIN_CONFIDENCE`.
+4. `GET /api/ai/imports/{id}` в `ready` сверяет строки с операциями кошелька
+   (`/api/reports/operations` токеном запроса) и отдаёт группы и готовые
+   операции с `uuid` v5 от отпечатка. Клиент шлёт их в `POST /sync/push` и
+   отмечает `POST …/committed`.
+
+Профили формата — `prompts/banks/*.txt` (встроенные; секции `[signature]`,
+`[hints]`, `[examples]`, `[check]`, см. `src/statement/profiles.hpp`) и свои
+форматы пользователя: пример добавляется из каждой правки суммы, даты или
+направления, ключ — отпечаток строки заголовка колонок.
+
+Фоновые задания идут после интерактивных: трата текстом ждёт не больше
+одного фрагмента. Импорт хранится в базе `ai` (`migrations/`, накат —
+`wallet-infra/infra/db/migrate.sh ai up`): необработанный — 90 дней,
+записанный (`done`) — 7. Без базы сервис работает, импорт отвечает 503, а
+`features` в `/status` — без `statement_import`. Импорт переживает рестарт:
+разобранные фрагменты не повторяются. В логах и метриках — только id,
+статусы, счётчики и длительности.
+
 ## Авторизация
 
 Access-токен google-auth (Bearer или cookie `session`), подпись по JWKS.
@@ -89,6 +130,16 @@ Access-токен google-auth (Bearer или cookie `session`), подпись �
 | `AI_QUEUE_MAX` | `20` | интерактивных заданий в очереди; больше — `429 busy` |
 | `AI_MAX_ACTIVE_PER_USER` | `3` | незавершённых заданий на пользователя |
 | `LLM_MAX_PER_MINUTE` | `10` | новых заданий на пользователя в минуту |
+| `DATABASE_URL` | пусто | база ai — импорт выписок; пусто — импорт выключен |
+| `AI_DB_POOL_SIZE` | `4` | соединений с базой ai |
+| `AI_EXTRACT_CHUNK_CHARS` | `1800` | фрагмент выписки, символов (без пустых строк и строк без цифр) |
+| `AI_IMPORTS_MAX_ACTIVE` | `3` | импортов в работе всего (на пользователя — один) |
+| `AI_IMPORT_TTL_DAYS` / `AI_IMPORT_DONE_TTL_DAYS` | `90` / `7` | срок необработанного и записанного импорта |
+| `AI_IMPORT_PAUSE_MAX_MINS` | `60` | сколько ждать LLM, прежде чем `failed: unavailable` |
+| `AI_CLASSIFY_MIN_CONFIDENCE` | `0.7` | ниже — категория только подсказкой (`suggestion`) |
+| `AI_PROFILE_MAX_TOKENS` | `500` | бюджет профиля формата в промпте; фрагмент меньше на столько же |
+| `AI_JOB_TIMEOUT_SECS_EXTRACT_ROWS` / `…_CLASSIFY_ROWS` | `180` / `60` | дедлайн вызова LLM |
+| `LLM_MAX_TOKENS_CLASSIFY_ROWS` | `1024` | у `extract_rows` — 60 на строку с суммой + 200, ≤ 2400 |
 | `PORT` / `HOST` | `8087` / `127.0.0.1` | |
 | `LOG_DIR` / `LOG_LEVEL` | stdout / debug | |
 
@@ -184,4 +235,9 @@ ctest --test-dir build --output-on-failure
 - `ai_jobs_by_platform_total{platform}` — откуда задания (web, telegram, …);
 - `ai_reports_errors_total{kind}` — ошибки запросов к wallet-report;
 - `jwt_claims_total{result}` — проверки iss/aud/scope;
+- `ai_statement_imports_total{status}` — импорты по итогу (`ready`, `done`,
+  `failed`, `cancelled`);
+- `ai_statement_rows_total{result}` — строки импортов: `verified`,
+  `check_failed`, `unparsed` — качество извлечения на живых выписках;
+- `ai_statement_chunk_duration_seconds{result}` — разбор одного фрагмента;
 - `http_requests_total`, `http_request_duration_seconds` — как у всех сервисов.

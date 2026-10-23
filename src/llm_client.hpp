@@ -108,14 +108,86 @@ std::string add_days(const std::string& ymd, int days);
 // "2026-10-11" -> "воскресенье". Невалидная дата — пусто.
 std::string weekday_ru(const std::string& ymd);
 
+// --- Импорт выписки (openspec/changes/add-statement-import) ---
+
+// extract_rows: пронумерованные строки фрагмента → операции со ссылками на
+// номера строк. Суммы и даты потом проверяет код (statement/verify).
+struct RowsRequest {
+    std::string numbered_text;   // «17| 12.09 YANDEX*GO … -450,00»
+    std::string date_context;    // заголовок даты из прошлого фрагмента или пусто
+    std::string today;           // дата создания импорта, ГГГГ-ММ-ДД
+    std::string period;          // «2026-09-01 — 2026-09-30» или пусто
+    std::string wallet_currency; // ISO
+    std::string profile;         // подсказки и примеры профиля формата (statement/profiles)
+};
+
+struct ExtractedRow {
+    std::vector<int> lines;
+    std::string date;
+    std::string amount;
+    std::string dir;
+    std::string currency;
+    std::string description;
+};
+
+struct RowsResult {
+    Status status = Status::Unavailable;
+    std::vector<ExtractedRow> rows;
+    double seconds = 0;
+    std::string detail;
+    int completion_tokens = 0;
+    int reasoning_tokens = 0;
+};
+
+// classify_rows: только описания продавцов и имена категорий — без сумм и дат.
+struct ClassifyRequest {
+    std::vector<std::string> patterns;
+    std::vector<std::string> categories;
+};
+
+struct Classified {
+    int i = 0;
+    std::string category; // имя из списка или пусто
+    double confidence = 0;
+};
+
+struct ClassifyResult {
+    Status status = Status::Unavailable;
+    std::vector<Classified> items;
+    double seconds = 0;
+    std::string detail;
+    int completion_tokens = 0;
+    int reasoning_tokens = 0;
+};
+
+nlohmann::json rows_request_body(const RowsRequest& r, const Prompt& prompt, const std::string& model,
+                                 const CallOptions& opts);
+RowsResult parse_rows_response(int http_status, const std::string& body);
+nlohmann::json classify_request_body(const ClassifyRequest& r, const Prompt& prompt, const std::string& model,
+                                     const CallOptions& opts);
+ClassifyResult parse_classify_response(int http_status, const std::string& body);
+
+// max_tokens extract_rows: 60 на строку с суммой + 200, не больше 2400 (D4).
+int rows_max_tokens(int money_lines);
+
 class Client {
 public:
     virtual ~Client() = default;
     virtual Result extract_expense(const ExpenseRequest& r, const CallOptions& opts) = 0;
     // Версия промпта, с которым клиент ходит в LLM, — для логов и eval.
     virtual const std::string& prompt_version() const = 0;
+
+    virtual RowsResult extract_rows(const RowsRequest& r, const CallOptions& opts) = 0;
+    virtual ClassifyResult classify_rows(const ClassifyRequest& r, const CallOptions& opts) = 0;
 };
 
-std::unique_ptr<Client> make_http_client(const Config& cfg, Prompt prompt);
+// Промпты импорта; пустые — импорт выключен (extract_rows/classify_rows
+// отвечают Unavailable).
+struct StatementPrompts {
+    Prompt rows;
+    Prompt classify;
+};
+
+std::unique_ptr<Client> make_http_client(const Config& cfg, Prompt prompt, StatementPrompts statement = {});
 
 } // namespace llm

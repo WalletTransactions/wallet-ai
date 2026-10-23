@@ -38,7 +38,7 @@ bool Store::user_over_rate(const std::string& user_id, Clock::time_point now) {
 std::size_t Store::active_of(const std::string& user_id) const {
     std::size_t n = 0;
     for (const auto& [id, job] : jobs_) {
-        if (job.user_id == user_id && !is_final(job.status)) ++n;
+        if (job.user_id == user_id && !job.internal && !is_final(job.status)) ++n;
     }
     return n;
 }
@@ -90,6 +90,23 @@ Created Store::create(const std::string& user_id, const std::string& kind, Prior
     jobs_.emplace(job.id, std::move(job));
     work_cv_.notify_one();
     return out;
+}
+
+std::string Store::create_internal(const std::string& user_id, const std::string& kind, nlohmann::json input) {
+    std::lock_guard<std::mutex> lock(mu_);
+    Job job;
+    job.id = uuidgen::v4();
+    job.user_id = user_id;
+    job.kind = kind;
+    job.priority = Priority::Background;
+    job.internal = true;
+    job.input = std::move(input);
+    job.created = now_();
+    background_.push_back(job.id);
+    std::string id = job.id;
+    jobs_.emplace(id, std::move(job));
+    work_cv_.notify_one();
+    return id;
 }
 
 std::optional<Job> Store::get(const std::string& id, const std::string& user_id, std::chrono::milliseconds wait) {

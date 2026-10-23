@@ -22,6 +22,8 @@ public:
         return next;
     }
     const std::string& prompt_version() const override { return version; }
+    llm::RowsResult extract_rows(const llm::RowsRequest&, const llm::CallOptions&) override { return {}; }
+    llm::ClassifyResult classify_rows(const llm::ClassifyRequest&, const llm::CallOptions&) override { return {}; }
 };
 
 json accounts_body() {

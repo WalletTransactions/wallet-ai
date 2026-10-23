@@ -46,6 +46,9 @@ struct Job {
     std::string failure;     // при Failed: timeout, unavailable, ...
     Status status = Status::Queued;
     bool cancel_requested = false; // DELETE во время Running: результат выбросим
+    // Задание импорта выписки (extract_rows, classify_rows) — создаёт сам
+    // сервис, в лимитах пользователя не считается (спека ai-jobs).
+    bool internal = false;
     Clock::time_point created;
     Clock::time_point started;
     Clock::time_point finished;
@@ -77,6 +80,11 @@ public:
     // же пользователя возвращает существующее задание (лимиты не трогает).
     Created create(const std::string& user_id, const std::string& kind, Priority priority, nlohmann::json input,
                    const std::string& idempotency_key);
+
+    // Фоновое задание импорта: мимо лимитов пользователя (busy,
+    // too_many_active, rate_limited) — у импорта свои (один в работе на
+    // пользователя, AI_IMPORTS_MAX_ACTIVE). Возвращает id.
+    std::string create_internal(const std::string& user_id, const std::string& kind, nlohmann::json input);
 
     // Снимок задания. nullopt — нет, истекло или чужое (вызывающий отвечает
     // 404, не 403: не выдавать, что такой id есть). wait > 0 — long-poll:

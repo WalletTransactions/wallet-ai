@@ -330,27 +330,267 @@ Result parse_expense_response(int http_status, const std::string& body) {
 
 namespace {
 
+// Общая часть ответа chat/completions: HTTP-статус, choices, обрыв,
+// <think>, JSON. content заполняется только при Status::Ok.
+struct Completion {
+    Status status = Status::BadResponse;
+    std::string detail;
+    json content;
+    int completion_tokens = 0;
+    int reasoning_tokens = 0;
+};
+
+Completion parse_completion(int http_status, const std::string& body) {
+    Completion c;
+    if (http_status == 401 || http_status == 403) {
+        c.status = Status::Unauthorized;
+        return c;
+    }
+    if (http_status == 404) {
+        c.status = Status::ModelNotLoaded;
+        return c;
+    }
+    if (http_status == 400) {
+        c.detail = "http_400";
+        return c;
+    }
+    if (http_status < 200 || http_status >= 300) {
+        c.status = Status::Unavailable;
+        c.detail = "http_" + std::to_string(http_status);
+        return c;
+    }
+    json resp;
+    try {
+        resp = json::parse(body);
+    } catch (const std::exception&) {
+        c.detail = "response_not_json";
+        return c;
+    }
+    if (resp.contains("usage") && resp["usage"].is_object()) {
+        const auto& u = resp["usage"];
+        c.completion_tokens = u.value("completion_tokens", 0);
+        if (u.contains("completion_tokens_details") && u["completion_tokens_details"].is_object()) {
+            c.reasoning_tokens = u["completion_tokens_details"].value("reasoning_tokens", 0);
+        }
+    }
+    if (!resp.contains("choices") || !resp["choices"].is_array() || resp["choices"].empty()) {
+        c.detail = "no_choices";
+        return c;
+    }
+    const auto& choice = resp["choices"][0];
+    if (choice.value("finish_reason", std::string{}) == "length") {
+        c.detail = "finish_reason_length";
+        return c;
+    }
+    if (!choice.contains("message") || !choice["message"].contains("content") || !choice["message"]["content"].is_string()) {
+        c.detail = "no_content";
+        return c;
+    }
+    try {
+        c.content = json::parse(strip_think(choice["message"]["content"].get<std::string>()));
+    } catch (const std::exception&) {
+        c.detail = "content_not_json";
+        return c;
+    }
+    c.status = Status::Ok;
+    return c;
+}
+
+json rows_schema() {
+    json row = {
+        {"type", "object"},
+        {"additionalProperties", false},
+        {"required", {"lines", "date", "amount", "dir", "currency", "description"}},
+        {"properties",
+         {
+             {"lines", {{"type", "array"}, {"items", {{"type", "integer"}, {"minimum", 1}}}, {"minItems", 1}}},
+             {"date", {{"type", "string"}, {"pattern", "^([0-9]{4}-[0-9]{2}-[0-9]{2})?$"}}},
+             {"amount", {{"type", "string"}, {"pattern", "^[0-9]+([.][0-9]{1,2})?$"}}},
+             {"dir", {{"type", "string"}, {"enum", {"expense", "income", "transfer"}}}},
+             {"currency", {{"type", "string"}, {"pattern", "^([A-Z]{3})?$"}}},
+             {"description", {{"type", "string"}}},
+         }},
+    };
+    return {{"type", "object"},
+            {"additionalProperties", false},
+            {"required", {"rows"}},
+            {"properties", {{"rows", {{"type", "array"}, {"items", row}}}}}};
+}
+
+json classify_schema(const std::vector<std::string>& categories) {
+    json item = {{"type", "object"},
+                 {"additionalProperties", false},
+                 {"required", {"i", "category", "confidence"}},
+                 {"properties",
+                  {{"i", {{"type", "integer"}, {"minimum", 0}}},
+                   {"category", string_enum(categories)},
+                   {"confidence", {{"type", "number"}, {"minimum", 0}, {"maximum", 1}}}}}};
+    return {{"type", "object"},
+            {"additionalProperties", false},
+            {"required", {"items"}},
+            {"properties", {{"items", {{"type", "array"}, {"items", item}}}}}};
+}
+
+json chat_body(const std::string& model, const CallOptions& opts, const std::string& system, const std::string& user,
+               const char* schema_name, json schema) {
+    json body = {
+        {"model", model},
+        {"temperature", 0},
+        {"max_tokens", opts.max_tokens},
+        {"stream", false},
+        {"messages", json::array({{{"role", "system"}, {"content", system}}, {{"role", "user"}, {"content", user}}})},
+        {"response_format",
+         {{"type", "json_schema"}, {"json_schema", {{"name", schema_name}, {"strict", true}, {"schema", std::move(schema)}}}}},
+    };
+    if (!opts.reasoning_effort.empty()) body["reasoning_effort"] = opts.reasoning_effort;
+    return body;
+}
+
+} // namespace
+
+int rows_max_tokens(int money_lines) { return std::min(60 * std::max(money_lines, 1) + 200, 2400); }
+
+json rows_request_body(const RowsRequest& r, const Prompt& prompt, const std::string& model, const CallOptions& opts) {
+    std::string system = prompt.text;
+    replace_all(system, "{today}", r.today);
+    replace_all(system, "{period}", r.period.empty() ? "не указан" : r.period);
+    replace_all(system, "{currency}", r.wallet_currency);
+    replace_all(system, "{profile}", r.profile);
+    std::string user;
+    if (!r.date_context.empty()) user += "Текущая дата (заголовок выше фрагмента): " + r.date_context + "\n";
+    user += r.numbered_text;
+    return chat_body(model, opts, strip_think(system), user, "statement_rows", rows_schema());
+}
+
+RowsResult parse_rows_response(int http_status, const std::string& body) {
+    RowsResult r;
+    Completion c = parse_completion(http_status, body);
+    r.status = c.status;
+    r.detail = c.detail;
+    r.completion_tokens = c.completion_tokens;
+    r.reasoning_tokens = c.reasoning_tokens;
+    if (c.status != Status::Ok) return r;
+    if (!c.content.is_object() || !c.content.contains("rows") || !c.content["rows"].is_array()) {
+        r.status = Status::BadResponse;
+        r.detail = "schema_rows";
+        return r;
+    }
+    for (const auto& item : c.content["rows"]) {
+        if (!item.is_object() || !item.contains("lines") || !item["lines"].is_array()) {
+            r.status = Status::BadResponse;
+            r.detail = "schema_lines";
+            r.rows.clear();
+            return r;
+        }
+        ExtractedRow row;
+        for (const auto& n : item["lines"]) {
+            if (n.is_number_integer()) row.lines.push_back(n.get<int>());
+        }
+        for (auto [key, field] : {std::pair<const char*, std::string*>{"date", &row.date}, {"amount", &row.amount},
+                                  {"dir", &row.dir}, {"currency", &row.currency}, {"description", &row.description}}) {
+            if (!is_string_field(item, key)) {
+                r.status = Status::BadResponse;
+                r.detail = std::string("schema_") + key;
+                r.rows.clear();
+                return r;
+            }
+            *field = item[key].get<std::string>();
+        }
+        r.rows.push_back(std::move(row));
+    }
+    return r;
+}
+
+json classify_request_body(const ClassifyRequest& r, const Prompt& prompt, const std::string& model,
+                           const CallOptions& opts) {
+    std::string system = prompt.text;
+    replace_all(system, "{categories}", r.categories.empty() ? "(нет)" : join(r.categories));
+    std::string user;
+    for (std::size_t i = 0; i < r.patterns.size(); ++i) user += std::to_string(i) + "| " + r.patterns[i] + "\n";
+    return chat_body(model, opts, system, user, "statement_categories", classify_schema(r.categories));
+}
+
+ClassifyResult parse_classify_response(int http_status, const std::string& body) {
+    ClassifyResult r;
+    Completion c = parse_completion(http_status, body);
+    r.status = c.status;
+    r.detail = c.detail;
+    r.completion_tokens = c.completion_tokens;
+    r.reasoning_tokens = c.reasoning_tokens;
+    if (c.status != Status::Ok) return r;
+    if (!c.content.is_object() || !c.content.contains("items") || !c.content["items"].is_array()) {
+        r.status = Status::BadResponse;
+        r.detail = "schema_items";
+        return r;
+    }
+    for (const auto& item : c.content["items"]) {
+        if (!item.is_object() || !item.contains("i") || !item["i"].is_number_integer() ||
+            !is_string_field(item, "category") || !item.contains("confidence") || !item["confidence"].is_number()) {
+            r.status = Status::BadResponse;
+            r.detail = "schema_item";
+            r.items.clear();
+            return r;
+        }
+        r.items.push_back({item["i"].get<int>(), item["category"].get<std::string>(), item["confidence"].get<double>()});
+    }
+    return r;
+}
+
+namespace {
+
 class HttpClient : public Client {
 public:
-    HttpClient(Config cfg, Prompt prompt)
-        : cfg_(std::move(cfg)), prompt_(std::move(prompt)), base_(split_base_url(cfg_.url)) {}
+    HttpClient(Config cfg, Prompt prompt, StatementPrompts statement)
+        : cfg_(std::move(cfg)),
+          prompt_(std::move(prompt)),
+          statement_(std::move(statement)),
+          base_(split_base_url(cfg_.url)) {}
 
     const std::string& prompt_version() const override { return prompt_.version; }
 
     Result extract_expense(const ExpenseRequest& req, const CallOptions& opts) override {
         auto started = std::chrono::steady_clock::now();
-        Result r = call(req, opts);
+        Result r;
+        auto res = post(expense_request_body(req, prompt_, cfg_.model, opts), opts, r.status, r.detail);
+        if (res) r = parse_expense_response(res->status, res->body);
+        r.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        return r;
+    }
+
+    RowsResult extract_rows(const RowsRequest& req, const CallOptions& opts) override {
+        auto started = std::chrono::steady_clock::now();
+        RowsResult r;
+        if (statement_.rows.text.empty()) {
+            r.detail = "no_prompt";
+            return r;
+        }
+        auto res = post(rows_request_body(req, statement_.rows, cfg_.model, opts), opts, r.status, r.detail);
+        if (res) r = parse_rows_response(res->status, res->body);
+        r.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        return r;
+    }
+
+    ClassifyResult classify_rows(const ClassifyRequest& req, const CallOptions& opts) override {
+        auto started = std::chrono::steady_clock::now();
+        ClassifyResult r;
+        if (statement_.classify.text.empty()) {
+            r.detail = "no_prompt";
+            return r;
+        }
+        auto res = post(classify_request_body(req, statement_.classify, cfg_.model, opts), opts, r.status, r.detail);
+        if (res) r = parse_classify_response(res->status, res->body);
         r.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
         return r;
     }
 
 private:
-    Result call(const ExpenseRequest& req, const CallOptions& opts) {
-        Result r;
+    // nullopt — до HTTP-ответа не дошло; status/detail тогда заполнены.
+    std::optional<httplib::Response> post(const json& body, const CallOptions& opts, Status& status,
+                                          std::string& detail) {
         if (cfg_.url.empty() || base_.origin.empty()) {
-            r.status = Status::Unavailable;
-            r.detail = "llm_disabled";
-            return r;
+            status = Status::Unavailable;
+            detail = "llm_disabled";
+            return std::nullopt;
         }
         // Клиент на вызов: вызовы редкие и долгие, держать соединение незачем.
         httplib::Client cli(base_.origin);
@@ -360,27 +600,27 @@ private:
         httplib::Headers headers;
         if (!cfg_.api_key.empty()) headers.emplace("Authorization", "Bearer " + cfg_.api_key);
 
-        auto res = cli.Post(base_.path + "/chat/completions", headers,
-                            expense_request_body(req, prompt_, cfg_.model, opts).dump(), "application/json");
+        auto res = cli.Post(base_.path + "/chat/completions", headers, body.dump(), "application/json");
         if (!res) {
             auto err = res.error();
-            r.status = (err == httplib::Error::Read || err == httplib::Error::Timeout) ? Status::Timeout
-                                                                                       : Status::Unavailable;
-            r.detail = httplib::to_string(err);
-            return r;
+            status = (err == httplib::Error::Read || err == httplib::Error::Timeout) ? Status::Timeout
+                                                                                     : Status::Unavailable;
+            detail = httplib::to_string(err);
+            return std::nullopt;
         }
-        return parse_expense_response(res->status, res->body);
+        return *res;
     }
 
     Config cfg_;
     Prompt prompt_;
+    StatementPrompts statement_;
     BaseUrl base_;
 };
 
 } // namespace
 
-std::unique_ptr<Client> make_http_client(const Config& cfg, Prompt prompt) {
-    return std::make_unique<HttpClient>(cfg, std::move(prompt));
+std::unique_ptr<Client> make_http_client(const Config& cfg, Prompt prompt, StatementPrompts statement) {
+    return std::make_unique<HttpClient>(cfg, std::move(prompt), std::move(statement));
 }
 
 } // namespace llm

@@ -1,14 +1,20 @@
-// Состояние процесса wallet-ai. Базы нет (TODO_wallet_ai.md, §6): задания
-// живут в памяти (jobs.hpp), база появится вместе с импортом выписок.
+// Состояние процесса wallet-ai. Задания живут в памяти (jobs.hpp); импорты
+// выписок — в базе ai (statement/repo.hpp), она необязательна.
 #pragma once
 
 #include <atomic>
+#include <functional>
+#include <map>
 #include <memory>
+#include <string>
 
 #include "clients/reports_client.hpp"
+#include "db.hpp"
+#include "imports.hpp"
 #include "jobs.hpp"
 #include "llm_client.hpp"
 #include "llm_probe.hpp"
+#include "parse_expense.hpp"
 #include "util/jwks.hpp"
 
 struct AppState {
@@ -36,4 +42,21 @@ struct AppState {
     llm::CallOptions parse_expense_opts;
 
     std::unique_ptr<jobs::Store> jobs;
+
+    // Обработчики фоновых заданий импорта по kind (extract_rows,
+    // classify_rows) — регистрирует ImportRunner; воркер выбирает по kind.
+    std::map<std::string, std::function<parse_expense::Outcome(const jobs::Job&)>> job_handlers;
+
+    // База ai отвечает и схема накачена (фоновая проба в main.cpp). Без неё
+    // импорт выписок выключен, parse_expense работает.
+    std::atomic<bool> db_up{false};
+    // DATABASE_URL задан и промпты импорта загружены.
+    bool imports_enabled = false;
+
+    // Импорт выписок (add-statement-import): пул базы ai, хранилище, логика
+    // ручек и планировщик. nullptr — импорт выключен.
+    std::unique_ptr<db::Pool> db;
+    std::unique_ptr<stmt::Repo> repo;
+    std::unique_ptr<imports::Service> import_service;
+    std::unique_ptr<imports::Runner> import_runner;
 };

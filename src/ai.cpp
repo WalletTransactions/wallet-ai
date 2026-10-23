@@ -38,7 +38,7 @@ void update_queue_gauges(const jobs::Store& store) {
 void handle_status(AppState& state, const httplib::Request& req, httplib::Response& res) {
     applog::set_route("GET /api/ai/status");
     if (!session::current_user(req, *state.jwks)) return reply_unauthenticated(res);
-    reply(res, 200, status_json(state.llm, state.llm_status.load()));
+    reply(res, 200, status_json(state.llm, state.llm_status.load(), state.imports_enabled && state.db_up.load()));
 }
 
 void handle_create(AppState& state, const httplib::Request& req, httplib::Response& res) {
@@ -49,6 +49,8 @@ void handle_create(AppState& state, const httplib::Request& req, httplib::Respon
     json body = json::parse(req.body, nullptr, /*allow_exceptions=*/false);
     if (!body.is_object()) return reply(res, 400, {{"error", "тело — JSON-объект {kind, input, idempotency_key?}"}});
     std::string kind = body.value("kind", std::string{});
+    // Виды импорта выписки создаёт только сам сервис (спека ai-jobs).
+    if (kind == "extract_rows" || kind == "classify_rows") return reply(res, 400, {{"error", "unknown_kind"}});
     if (kind != parse_expense::kKind) return reply(res, 400, {{"error", "неизвестный kind: " + kind}});
     json input = body.value("input", json());
     if (std::string err = parse_expense::validate_input(input); !err.empty()) return reply(res, 400, {{"error", err}});
@@ -122,7 +124,7 @@ void handle_cancel(AppState& state, const httplib::Request& req, httplib::Respon
 
 } // namespace
 
-json status_json(const llm::Config& cfg, llm::ProbeResult status) {
+json status_json(const llm::Config& cfg, llm::ProbeResult status, bool statement_import) {
     bool enabled = status == llm::ProbeResult::Ok;
     json j;
     j["enabled"] = enabled;
@@ -131,6 +133,7 @@ json status_json(const llm::Config& cfg, llm::ProbeResult status) {
     j["model"] = enabled ? json(cfg.model) : json(nullptr);
     j["reason"] = enabled ? json(nullptr) : json(llm::to_string(status));
     j["features"] = enabled ? json::array({parse_expense::kKind}) : json::array();
+    if (enabled && statement_import) j["features"].push_back("statement_import");
     return j;
 }
 
@@ -143,6 +146,20 @@ json job_json(const jobs::Job& job) {
     if (job.status == jobs::Status::Done) j["result"] = job.result;
     if (job.status == jobs::Status::Failed) j["failure"] = job.failure;
     return j;
+}
+
+parse_expense::Outcome run_job(AppState& state, const jobs::Job& job) {
+    if (job.kind == parse_expense::kKind) {
+        return parse_expense::run(job.input, *state.llm_client, state.parse_expense_opts);
+    }
+    auto handler = state.job_handlers.find(job.kind);
+    if (handler != state.job_handlers.end()) return handler->second(job);
+    // Неизвестный вид — без вызова LLM.
+    parse_expense::Outcome out;
+    out.status = jobs::Status::Failed;
+    out.failure = "internal";
+    out.log = {{"error", "unknown_kind"}};
+    return out;
 }
 
 void register_routes(httplib::Server& svr, AppState& state) {
@@ -168,7 +185,7 @@ void run_worker(AppState& state) {
         auto started = std::chrono::steady_clock::now();
         parse_expense::Outcome out;
         try {
-            out = parse_expense::run(job->input, *state.llm_client, state.parse_expense_opts);
+            out = run_job(state, *job);
         } catch (const std::exception& e) {
             out.status = jobs::Status::Failed;
             out.failure = "internal";

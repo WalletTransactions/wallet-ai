@@ -11,14 +11,27 @@
 // --prompt — другой файл промпта (подбор версий без правки prompts/).
 //
 // Печатает по строке JSON на фразу: статус, поля, время, токены.
+//
+// Выписка (импорт, extract_rows + проверка кодом):
+//   wallet_ai_llm_try --statement tests/statements/<bank>/sample.csv \
+//     [--profile prompts/banks/<bank>.txt] [--currency RUB] [--today 2026-10-22] \
+//     [--chunk-chars 1800] [--rows]
+#include <algorithm>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "llm_client.hpp"
 #include "nlohmann/json.hpp"
+#include "statement/chunk.hpp"
+#include "statement/profiles.hpp"
+#include "statement/source.hpp"
+#include "statement/textutil.hpp"
+#include "statement/verify.hpp"
 
 namespace {
 
@@ -37,6 +50,120 @@ std::string env_or(const char* key, const std::string& fallback) {
     return (v != nullptr && *v != '\0') ? std::string(v) : fallback;
 }
 
+// --statement: выписка целиком тем же путём, что задания extract_rows
+// (фрагменты, промпт, профиль, проверка кодом), без сервиса и базы. По
+// строке JSON на фрагмент и итог — доли verified / check_failed / unparsed
+// (openspec/changes/add-statement-import, задачи 4.2 и 4.11).
+int run_statement(const llm::Config& cfg, const std::string& path, const std::string& today,
+                  const std::string& currency, const std::string& profile_path, std::size_t chunk_chars,
+                  bool print_rows) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+        std::cerr << "нет файла " << path << "\n";
+        return 2;
+    }
+    std::ostringstream buf;
+    buf << f.rdbuf();
+    std::string text = buf.str();
+    auto ext = path.substr(path.find_last_of('.') + 1);
+    if (ext == "pdf") {
+        auto t = stmt::pdf_to_text(text, 20, 256u * 1024 * 1024);
+        if (!t) {
+            std::cerr << "pdftotext не справился\n";
+            return 2;
+        }
+        text = *t;
+    } else {
+        text = stmt::decode_text(text);
+    }
+    std::replace(text.begin(), text.end(), '\f', '\n');
+    auto lines = stmt::split_lines(text);
+
+    llm::StatementPrompts prompts{llm::load_prompt("prompts/extract_rows.txt"),
+                                  llm::load_prompt("prompts/classify_rows.txt")};
+    auto client = llm::make_http_client(cfg, llm::load_prompt("prompts/expense.txt"), prompts);
+    std::string profile_text;
+    stmt::CheckRules rules;
+    std::string profile_version = "none";
+    if (!profile_path.empty()) {
+        std::ifstream pf(profile_path, std::ios::binary);
+        std::ostringstream pbuf;
+        pbuf << pf.rdbuf();
+        auto p = stmt::parse_profile(pbuf.str());
+        profile_text = stmt::profile_prompt(&p, {}, 500);
+        rules = p.check;
+        profile_version = p.version;
+    }
+    std::size_t budget = stmt::estimate_tokens(profile_text) * 3;
+    auto plans = stmt::plan_chunks(lines, chunk_chars > budget + 600 ? chunk_chars - budget : 600);
+    auto period = stmt::find_period(lines);
+
+    int verified = 0;
+    int check_failed = 0;
+    std::set<int> covered;
+    for (const auto& c : plans) {
+        llm::RowsRequest req;
+        req.numbered_text = stmt::numbered_text(lines, c.first_line, c.last_line);
+        req.date_context = c.date_context;
+        req.today = today;
+        req.period = period.from.empty() ? "" : period.from + " — " + period.to;
+        req.wallet_currency = currency;
+        req.profile = profile_text;
+        llm::CallOptions opts;
+        opts.max_tokens = llm::rows_max_tokens(stmt::money_lines(lines, c.first_line, c.last_line));
+        opts.timeout_ms = 180000;
+        auto r = client->extract_rows(req, opts);
+        stmt::VerifyContext ctx;
+        ctx.lines = &lines;
+        ctx.chunk_first = c.first_line;
+        ctx.chunk_last = c.last_line;
+        ctx.date_context = c.date_context;
+        ctx.today = today;
+        ctx.period = period;
+        ctx.wallet_currency = currency;
+        ctx.rules = rules;
+        int ok = 0;
+        int bad = 0;
+        for (const auto& row : r.rows) {
+            auto v = stmt::verify_row({row.lines, row.date, row.amount, row.dir, row.currency, row.description}, ctx);
+            if (!v) continue;
+            if (v->check.empty()) {
+                ++ok;
+                covered.insert(v->lines.begin(), v->lines.end());
+            } else {
+                ++bad;
+            }
+            if (print_rows) {
+                std::cout << nlohmann::json{{"lines", v->lines}, {"date", v->date}, {"amount", v->amount},
+                                            {"dir", v->dir}, {"description", v->description}, {"check", v->check}}
+                                 .dump(-1, ' ', false)
+                          << "\n";
+            }
+        }
+        verified += ok;
+        check_failed += bad;
+        nlohmann::json out = {{"chunk", std::to_string(c.first_line) + "-" + std::to_string(c.last_line)},
+                              {"status", llm::to_string(r.status)},
+                              {"seconds", static_cast<int>(r.seconds * 10) / 10.0},
+                              {"tokens", r.completion_tokens},
+                              {"verified", ok},
+                              {"check_failed", bad}};
+        if (!r.detail.empty()) out["detail"] = r.detail;
+        std::cout << out.dump(-1, ' ', false) << "\n";
+    }
+    int unparsed = static_cast<int>(
+        stmt::uncovered_lines(lines, 1, static_cast<int>(lines.size()), covered, rules.stop_words).size());
+    int total = verified + check_failed + unparsed;
+    auto share = [&](int n) { return total == 0 ? 0.0 : static_cast<int>(1000.0 * n / total) / 10.0; };
+    std::cout << nlohmann::json{{"profile", profile_version},     {"chunks", plans.size()},
+                                {"verified", verified},           {"check_failed", check_failed},
+                                {"unparsed", unparsed},           {"verified_pct", share(verified)},
+                                {"check_failed_pct", share(check_failed)}, {"unparsed_pct", share(unparsed)}}
+                     .dump(-1, ' ', false)
+              << "\n";
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -51,6 +178,11 @@ int main(int argc, char** argv) {
     std::vector<std::string> texts;
     bool dump_body = false; // --dump-body: напечатать тело запроса первой фразы и выйти
     std::string prompt_path = "prompts/expense.txt";
+    std::string statement_path;
+    std::string currency = "RUB";
+    std::string profile_path;
+    std::size_t chunk_chars = 1800;
+    bool print_rows = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -74,8 +206,26 @@ int main(int argc, char** argv) {
             prompt_path = next();
         } else if (a == "--dump-body") {
             dump_body = true;
+        } else if (a == "--statement") {
+            statement_path = next();
+        } else if (a == "--currency") {
+            currency = next();
+        } else if (a == "--profile") {
+            profile_path = next();
+        } else if (a == "--chunk-chars") {
+            chunk_chars = static_cast<std::size_t>(std::stoi(next()));
+        } else if (a == "--rows") {
+            print_rows = true;
         } else {
             texts.push_back(a);
+        }
+    }
+    if (!statement_path.empty()) {
+        try {
+            return run_statement(cfg, statement_path, base.today, currency, profile_path, chunk_chars, print_rows);
+        } catch (const std::exception& e) {
+            std::cerr << e.what() << "\n";
+            return 2;
         }
     }
     if (texts.empty()) {

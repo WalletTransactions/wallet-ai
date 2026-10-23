@@ -2,15 +2,18 @@
 #
 # Multi-stage build wallet-ai — тот же шаблон, что у wallet-telegram:
 # deps -> build (образ), deps -> test (юнит-тесты, `--target test`), runtime.
-# Базы нет, libpq не нужен. curl в рантайме — для healthcheck в compose.
+# libpq — база ai (импорт выписок), poppler-utils — pdftotext для PDF-выписок.
+# curl в рантайме — для healthcheck в compose.
 
 FROM debian:bookworm-slim AS deps
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         cmake \
+        libpq-dev \
         libssl-dev \
         pkg-config \
+        poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -41,6 +44,8 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         libssl3 \
+        libpq5 \
+        poppler-utils \
         curl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --create-home --home-dir /app --shell /usr/sbin/nologin appuser

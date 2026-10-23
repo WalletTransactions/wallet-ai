@@ -16,11 +16,15 @@
 #include <string>
 #include <thread>
 
+#include <ctime>
+
 #include "access.hpp"
 #include "ai.hpp"
 #include "app_state.hpp"
 #include "docs.hpp"
 #include "httplib.h"
+#include "imports_http.hpp"
+#include "statement/repo.hpp"
 #include "llm_probe.hpp"
 #include "nlohmann/json.hpp"
 #include "util/dotenv.hpp"
@@ -77,6 +81,98 @@ void set_llm_status(AppState& state, llm::ProbeResult r) {
     } else if (r != llm::ProbeResult::Disabled) {
         applog::warn("LLM unavailable", details);
     }
+}
+
+int env_int(const char* key, int fallback) { return std::stoi(env_or(key, std::to_string(fallback))); }
+
+// Импорт выписок (openspec/changes/add-statement-import). Необязателен: без
+// DATABASE_URL или промптов сервис работает, а /api/ai/imports отвечает 503.
+// База может подняться позже сервиса — подключение повторяется в фоне;
+// указатели в state выставляются до db_up = true, хендлеры смотрят на db_up.
+void setup_imports(AppState& state, const std::string& prompt_dir, const std::string& database_url) {
+    if (database_url.empty()) {
+        applog::warn("DATABASE_URL не задан — импорт выписок выключен", {{"event", "imports_disabled"}});
+        return;
+    }
+    llm::StatementPrompts prompts;
+    try {
+        prompts.rows = llm::load_prompt(prompt_dir + "/extract_rows.txt");
+        prompts.classify = llm::load_prompt(prompt_dir + "/classify_rows.txt");
+    } catch (const std::exception& e) {
+        applog::error(std::string("импорт выписок выключен: ") + e.what(), {{"event", "imports_disabled"}});
+        return;
+    }
+    // Клиент LLM с промптами импорта заменяет созданный выше (тот же конфиг).
+    state.llm_client = llm::make_http_client(state.llm, state.expense_prompt, prompts);
+    state.imports_enabled = true;
+
+    imports::Config cfg;
+    cfg.chunk_chars = static_cast<std::size_t>(env_int("AI_EXTRACT_CHUNK_CHARS", 1800));
+    cfg.max_active = env_int("AI_IMPORTS_MAX_ACTIVE", 3);
+    cfg.ttl_days = env_int("AI_IMPORT_TTL_DAYS", 90);
+    cfg.done_ttl_days = env_int("AI_IMPORT_DONE_TTL_DAYS", 7);
+    cfg.pause_max_mins = env_int("AI_IMPORT_PAUSE_MAX_MINS", 60);
+    cfg.classify_min_confidence = std::stod(env_or("AI_CLASSIFY_MIN_CONFIDENCE", "0.7"));
+    cfg.profile_max_tokens = static_cast<std::size_t>(env_int("AI_PROFILE_MAX_TOKENS", 500));
+    auto profiles = stmt::load_profiles(prompt_dir + "/banks");
+
+    llm::CallOptions extract_opts; // max_tokens — по числу строк фрагмента
+    extract_opts.reasoning_effort = "none";
+    extract_opts.timeout_ms = env_int("AI_JOB_TIMEOUT_SECS_EXTRACT_ROWS", 180) * 1000;
+    llm::CallOptions classify_opts;
+    classify_opts.reasoning_effort = "none";
+    classify_opts.max_tokens = env_int("LLM_MAX_TOKENS_CLASSIFY_ROWS", 1024);
+    classify_opts.timeout_ms = env_int("AI_JOB_TIMEOUT_SECS_CLASSIFY_ROWS", 60) * 1000;
+
+    // Обработчики видов — сразу: воркеры стартуют раньше, чем база.
+    state.job_handlers["extract_rows"] = [&state](const jobs::Job& job) {
+        return state.db_up.load() ? state.import_runner->handle_extract(job)
+                                  : parse_expense::Outcome{jobs::Status::Failed, nullptr, "unavailable", {}};
+    };
+    state.job_handlers["classify_rows"] = [&state](const jobs::Job& job) {
+        return state.db_up.load() ? state.import_runner->handle_classify(job)
+                                  : parse_expense::Outcome{jobs::Status::Failed, nullptr, "unavailable", {}};
+    };
+
+    std::size_t pool_size = static_cast<std::size_t>(std::max(1, env_int("AI_DB_POOL_SIZE", 4)));
+    std::thread([&state, database_url, pool_size, cfg, profiles = std::move(profiles), extract_opts,
+                 classify_opts]() mutable {
+        // Подключение и проверка схемы — до успеха, раз в 30 с.
+        for (;;) {
+            try {
+                auto pool = std::make_unique<db::Pool>(database_url, pool_size);
+                pool->acquire()->verify_schema();
+                state.db = std::move(pool);
+                break;
+            } catch (const std::exception& e) {
+                applog::warn("база ai недоступна, импорт выписок ждёт", {{"event", "db_unavailable"},
+                                                                         {"error", e.what()}});
+                std::this_thread::sleep_for(std::chrono::seconds(30));
+            }
+        }
+        state.repo = stmt::make_pg_repo(*state.db);
+        state.import_service = std::make_unique<imports::Service>(
+            *state.repo, *state.reports, std::move(profiles), cfg,
+            [] { return static_cast<stmt::Epoch>(std::time(nullptr)); });
+        state.import_runner = std::make_unique<imports::Runner>(
+            *state.repo, *state.jobs, *state.llm_client, *state.import_service,
+            [&state] { return state.llm_status.load() == llm::ProbeResult::Ok; }, extract_opts, classify_opts);
+        state.import_service->on_change = [&state] { state.import_runner->wake(); };
+        state.import_service->on_delete = [&state](const std::string& id) { state.import_runner->cancel_import(id); };
+        state.db_up.store(true);
+        applog::info("база ai подключена, импорт выписок включён", {{"event", "db_connected"}});
+
+        std::thread([&state] { state.import_runner->run([&state] { return state.db_up.load(); }); }).detach();
+        // Проба базы: статус и 503 видят, что Postgres пропал.
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::seconds(30));
+            bool up = state.repo->ping();
+            if (up != state.db_up.exchange(up)) {
+                applog::warn(up ? "база ai снова доступна" : "база ai недоступна", {{"event", "db_probe"},
+                                                                                     {"up", up}});
+            }
+        }
+    }).detach();
 }
 
 } // namespace
@@ -139,6 +235,8 @@ int main() {
     limits.ttl = std::chrono::seconds(std::stoi(env_or("AI_JOB_TTL_SECS", "600")));
     state.jobs = std::make_unique<jobs::Store>(limits);
 
+    setup_imports(state, prompt_dir, env_or("DATABASE_URL", ""));
+
     // Воркеры = одновременные запросы к GPU (§4): на одной видеокарте — 1.
     int workers = std::max(1, std::stoi(env_or("LLM_MAX_CONCURRENT", "1")));
     for (int i = 0; i < workers; ++i) std::thread([&state] { aiapi::run_worker(state); }).detach();
@@ -169,7 +267,10 @@ int main() {
         handle_pre_routing(req, res);
         return authz::gate(req, res, *state.jwks);
     });
+    // Выписка до 5 МБ в base64 (D9) — с запасом на JSON вокруг.
+    svr.set_payload_max_length(8u * 1024 * 1024);
     aiapi::register_routes(svr, state);
+    imports::register_routes(svr, state);
     docsapi::register_routes(svr); // GET /openapi.yaml, /docs, /healthz, /metrics, /version
 
     svr.set_exception_handler([](const httplib::Request& req, httplib::Response& res, std::exception_ptr ep) {

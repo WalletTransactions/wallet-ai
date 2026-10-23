@@ -6,6 +6,8 @@ add_executable(wallet_ai_tests
     test_expense_check.cpp
     test_jobs.cpp
     test_parse_expense.cpp
+    test_statement.cpp
+    test_imports.cpp
 )
 target_include_directories(wallet_ai_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 # Тесты читают настоящий prompts/expense.txt из исходников.

@@ -10,8 +10,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(WALLET_COMMON_DIR ${CMAKE_SOURCE_DIR}/third_party/wallet-common)
 
 # OpenSSL — проверка подписи access-токена (RS256 по JWKS google-auth).
-# Базы на шаге 1 нет (org/docs/TODO_wallet_ai.md, §6).
 find_package(OpenSSL REQUIRED)
+# PostgreSQL — своя база ai (импорт выписок, add-statement-import).
+find_package(PostgreSQL REQUIRED)
 find_package(Threads REQUIRED)
 
 # Версия — тот же приём, что у остальных сервисов (см. CMakeLists.txt
@@ -50,12 +51,23 @@ configure_file(
 add_library(wallet_ai_core STATIC
     src/access.cpp
     src/ai.cpp
+    src/db.cpp
     src/expense_check.cpp
+    src/import_runner.cpp
+    src/imports.cpp
+    src/imports_http.cpp
     src/jobs.cpp
     src/llm_client.cpp
     src/llm_probe.cpp
     src/parse_expense.cpp
     src/session.cpp
+    src/statement/chunk.cpp
+    src/statement/pattern.cpp
+    src/statement/pg_repo.cpp
+    src/statement/profiles.cpp
+    src/statement/source.cpp
+    src/statement/textutil.cpp
+    src/statement/verify.cpp
     ${WALLET_COMMON_DIR}/expense/resolver.cpp
     ${WALLET_COMMON_DIR}/expense/strict.cpp
     ${WALLET_COMMON_DIR}/expense/text.cpp
@@ -84,6 +96,7 @@ target_compile_options(wallet_ai_core PUBLIC
 )
 target_link_libraries(wallet_ai_core PUBLIC
     OpenSSL::Crypto
+    PostgreSQL::PostgreSQL
     Threads::Threads
 )
 if(WIN32)

@@ -9,6 +9,7 @@
 #include "app_state.hpp"
 #include "httplib.h"
 #include "nlohmann/json.hpp"
+#include "parse_expense.hpp"
 
 namespace aiapi {
 
@@ -18,12 +19,18 @@ inline constexpr int kMaxWaitSecs = 25;
 // Тело GET /api/ai/status — чистая функция для тестов.
 // enabled — LLM настроена и отвечает с нужной моделью; features — виды
 // заданий, которые сейчас можно создать.
-nlohmann::json status_json(const llm::Config& cfg, llm::ProbeResult status);
+// statement_import — импорт выписок настроен и база ai отвечает; в features
+// он попадает только вместе с включённым ИИ.
+nlohmann::json status_json(const llm::Config& cfg, llm::ProbeResult status, bool statement_import = false);
 
 // Снимок задания для GET — чистая функция.
 nlohmann::json job_json(const jobs::Job& job);
 
 void register_routes(httplib::Server& svr, AppState& state);
+
+// Обработчик задания по kind: parse_expense, виды из state.job_handlers
+// (импорт выписки), неизвестный — failed: internal без вызова LLM.
+parse_expense::Outcome run_job(AppState& state, const jobs::Job& job);
 
 // Цикл воркера: берёт задания, пока store не остановлен.
 void run_worker(AppState& state);

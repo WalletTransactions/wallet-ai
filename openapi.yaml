@@ -20,6 +20,8 @@ servers:
 tags:
   - name: ai
     description: LLM-функции
+  - name: imports
+    description: Импорт банковских выписок
   - name: docs
     description: "Эта спека, Swagger UI, healthcheck, метрики, версия — не часть API"
 
@@ -58,8 +60,10 @@ paths:
                     enum: [disabled, unreachable, unauthorized, model_not_loaded, bad_response, null]
                   features:
                     type: array
-                    description: что умеет сервис (пусто до шага 3 — parse_expense)
-                    items: {type: string}
+                    description: |
+                      Что сейчас можно: `parse_expense` — при включённом ИИ,
+                      `statement_import` — ещё и база ai отвечает.
+                    items: {type: string, enum: [parse_expense, statement_import]}
         "401":
           description: Нет токена, подпись не сошлась, токен просрочен, выпущен не для wallet-ai или старого формата
           content:
@@ -123,7 +127,7 @@ paths:
                   job_id: {type: string, format: uuid}
                   status: {type: string, enum: [queued, running, done, failed, cancelled]}
         "400":
-          description: Неизвестный kind или неверный input
+          description: "Неизвестный kind или неверный input; `unknown_kind` — extract_rows/classify_rows создаёт только сам сервис"
           content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
         "401":
           description: Нет токена / не для wallet-ai / wallet-report не принял токен
@@ -173,6 +177,309 @@ paths:
         "204": {description: Отменено}
         "404":
           description: Нет, истекло, чужое или уже завершено
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+
+  /api/ai/imports:
+    post:
+      operationId: createImport
+      summary: Импорт банковской выписки (асинхронно)
+      description: |
+        Текст выписки или файл (`.pdf` с текстовым слоем, `.csv`, `.txt` до
+        5 МБ, base64) и кошелёк. Ответ сразу — `202 {import_id}`, разбор идёт
+        в фоне: LLM извлекает строки по фрагментам, код проверяет суммы и
+        даты по исходнику, затем категории — правила пользователя и LLM.
+        Клиент опрашивает `GET /api/ai/imports/{id}`. Ничего не пишется в
+        кошелёк: готовые операции клиент шлёт в `POST /sync/push` сам.
+
+        PDF без текстового слоя (скан) — импорт создаётся сразу в `failed`
+        с `failure: no_text`. Не больше одного импорта в работе на
+        пользователя и `AI_IMPORTS_MAX_ACTIVE` всего.
+      tags: [imports]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [wallet_uuid]
+              description: Ровно один источник — text или file.
+              properties:
+                wallet_uuid: {type: string, format: uuid, description: Живой неархивный кошелёк; его валюта — валюта выписки}
+                text: {type: string, description: Вставленный текст выписки}
+                source_name: {type: string, description: Имя для списка, если источник — text}
+                file:
+                  type: object
+                  required: [name, content_base64]
+                  properties:
+                    name: {type: string, example: statement.pdf}
+                    content_base64: {type: string, description: Стандартный base64 или base64url}
+                profile:
+                  type: string
+                  default: auto
+                  description: "`auto`, `none`, id встроенного профиля или своего формата (GET /api/ai/statement-profiles)"
+      responses:
+        "202":
+          description: Импорт создан
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [import_id, status]
+                properties:
+                  import_id: {type: string, format: uuid}
+                  status: {type: string, enum: [queued, failed]}
+                  failure: {type: string, enum: [no_text]}
+        "400":
+          description: "`one_source`, `empty`, `unknown_wallet`, `unknown_profile`, `unsupported_file`, `bad_base64`, `bad_request`"
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "401":
+          description: Нет токена / не для wallet-ai / wallet-report не принял токен
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "413":
+          description: "`too_large` — файл больше 5 МБ, текст больше 300 000 символов или 80 фрагментов: разбейте по месяцам"
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "429":
+          description: "`import_in_progress` (+ `import_id` текущего) или `busy` — в работе AI_IMPORTS_MAX_ACTIVE импортов"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: {type: string}
+                  import_id: {type: string, format: uuid}
+        "502":
+          description: wallet-report недоступен
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "503":
+          description: "`unavailable` — база ai не отвечает или импорт не настроен"
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+    get:
+      operationId: listImports
+      summary: Импорты пользователя, новые первыми (без строк)
+      tags: [imports]
+      responses:
+        "200":
+          description: Список
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  imports: {type: array, items: {$ref: "#/components/schemas/Import"}}
+        "503":
+          description: "`unavailable`"
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+
+  /api/ai/imports/{id}:
+    parameters:
+      - {in: path, name: id, required: true, schema: {type: string, format: uuid}}
+    get:
+      operationId: getImport
+      summary: Статус, прогресс, а в ready/done — строки, группы и готовые операции
+      description: |
+        Для `ready` строки сверяются с операциями кошелька
+        (`GET /api/reports/operations` токеном запроса, период ±2 дня):
+        `exists` — та же сумма, дата ±1 день, кандидат единственный;
+        `possible_duplicate` — кандидатов несколько; `imported` — отпечаток
+        уже записан раньше. Сверка кэшируется на минуту; `?reconcile=1` —
+        заново. wallet-report недоступен — `reconciled: false`.
+      tags: [imports]
+      parameters:
+        - {in: query, name: reconcile, schema: {type: string, enum: ["1"]}}
+      responses:
+        "200":
+          description: Импорт
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ImportDetail"}
+        "404":
+          description: Нет, истёк или чужой
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+    delete:
+      operationId: deleteImport
+      summary: Отменить разбор и удалить импорт со строками и текстом
+      description: Отпечатки уже записанных строк остаются.
+      tags: [imports]
+      responses:
+        "204": {description: Удалён}
+        "404":
+          description: Нет или чужой
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+
+  /api/ai/imports/{id}/retry:
+    parameters:
+      - {in: path, name: id, required: true, schema: {type: string, format: uuid}}
+    post:
+      operationId: retryImport
+      summary: Продолжить failed-импорт с первого неразобранного фрагмента
+      tags: [imports]
+      responses:
+        "202": {description: Разбор продолжается}
+        "404":
+          description: Нет или чужой
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "409":
+          description: "`not_retryable` — не failed или no_text"
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "429":
+          description: "`import_in_progress`"
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+
+  /api/ai/imports/{id}/rows:
+    parameters:
+      - {in: path, name: id, required: true, schema: {type: string, format: uuid}}
+    patch:
+      operationId: patchImportRows
+      summary: Правки строк пачкой (все или ни одной)
+      description: |
+        Категория создаёт или обновляет правило продавца и ставится остальным
+        строкам с тем же `pattern`, если их категорию не выбирал
+        пользователь. Сумма снимает `amount_not_in_text`/`currency_mismatch`,
+        дата — `date_not_in_text`. Правка суммы, даты или направления
+        добавляет пример в свой формат пользователя.
+      tags: [imports]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rows]
+              properties:
+                rows:
+                  type: array
+                  items:
+                    type: object
+                    required: [row_id]
+                    properties:
+                      row_id: {type: string, format: uuid}
+                      category_uuid: {type: [string, "null"]}
+                      amount: {type: string, description: Положительная, «1290.00»}
+                      date: {type: string, description: ГГГГ-ММ-ДД, не в будущем}
+                      dir: {type: string, enum: [expense, income, transfer]}
+                      comment: {type: [string, "null"], maxLength: 255}
+                      decision: {type: [string, "null"], enum: [include, skip, duplicate, null]}
+      responses:
+        "200":
+          description: Импорт после правок
+          content: {application/json: {schema: {$ref: "#/components/schemas/ImportDetail"}}}
+        "400":
+          description: "`unknown_row`, `unknown_category`, `bad_amount`, `bad_date`, `bad_dir`, `bad_decision`"
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "409":
+          description: "`not_ready` или `row_committed`"
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+    post:
+      operationId: addImportRow
+      summary: Строка вручную из «не разобрано»
+      tags: [imports]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [line, amount, date]
+              properties:
+                line: {type: integer, description: Номер строки исходника}
+                amount: {type: string}
+                date: {type: string}
+                category_uuid: {type: string}
+                description: {type: string, description: По умолчанию — текст строки}
+                comment: {type: string}
+      responses:
+        "201":
+          description: "Импорт со строкой (`source: manual`)"
+          content: {application/json: {schema: {$ref: "#/components/schemas/ImportDetail"}}}
+        "400":
+          description: "`bad_line`, `bad_amount`, `bad_date`, `unknown_category`"
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+
+  /api/ai/imports/{id}/committed:
+    parameters:
+      - {in: path, name: id, required: true, schema: {type: string, format: uuid}}
+    post:
+      operationId: commitImportRows
+      summary: Отметить записанные строки
+      description: |
+        Клиент записал операции через `POST /sync/push` и отмечает их строки:
+        отпечатки уходят в `statement_imported`, строки больше не меняются.
+        Записаны или отклонены все строки — импорт `done` и хранится ещё
+        `AI_IMPORT_DONE_TTL_DAYS` дней.
+      tags: [imports]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [row_ids]
+              properties:
+                row_ids: {type: array, items: {type: string, format: uuid}}
+      responses:
+        "200":
+          description: Импорт после отметки
+          content: {application/json: {schema: {$ref: "#/components/schemas/ImportDetail"}}}
+
+  /api/ai/statement-profiles:
+    get:
+      operationId: listStatementProfiles
+      summary: Встроенные профили и свои форматы пользователя
+      tags: [imports]
+      responses:
+        "200":
+          description: Профили для формы загрузки
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  profiles:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, name, kind]
+                      properties:
+                        id: {type: string}
+                        name: {type: string}
+                        kind: {type: string, enum: [builtin, own]}
+                        examples: {type: integer, description: У своего формата}
+
+  /api/ai/statement-profiles/{id}:
+    parameters:
+      - {in: path, name: id, required: true, schema: {type: string}}
+    patch:
+      operationId: renameStatementProfile
+      summary: Переименовать свой формат
+      tags: [imports]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string}
+      responses:
+        "200": {description: Переименован}
+        "403":
+          description: Встроенный профиль не меняется
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "404":
+          description: Нет или чужой
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+    delete:
+      operationId: deleteStatementProfile
+      summary: Удалить свой формат с примерами
+      tags: [imports]
+      responses:
+        "204": {description: Удалён}
+        "403":
+          description: Встроенный профиль не удаляется
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "404":
+          description: Нет или чужой
           content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
 
   /docs:
@@ -350,3 +657,106 @@ components:
         iso_code: {type: string}
         symbol: {type: string}
         precision: {type: integer}
+
+    Import:
+      type: object
+      required: [import_id, status, wallet_uuid, created_at, expires_at]
+      properties:
+        import_id: {type: string, format: uuid}
+        status: {type: string, enum: [queued, extracting, classifying, ready, done, failed, cancelled]}
+        failure: {type: [string, "null"], enum: [no_text, timeout, unavailable, null]}
+        wallet_uuid: {type: string, format: uuid}
+        source_name: {type: string}
+        created_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time, description: Когда удалится по текущим правилам; при done пересчитывается}
+        period:
+          type: [object, "null"]
+          properties:
+            from: {type: string}
+            to: {type: string}
+        progress:
+          type: object
+          description: В extracting — по фрагментам, в classifying — по пачкам
+          properties:
+            done: {type: integer}
+            total: {type: integer}
+        paused_since: {type: string, format: date-time, description: LLM недоступна — разбор на паузе}
+        profile:
+          type: [object, "null"]
+          properties:
+            id: {type: string}
+            name: {type: string}
+            source: {type: string, enum: [auto, manual]}
+        profile_detect: {type: [string, "null"], enum: [none, ambiguous, null]}
+
+    ImportDetail:
+      allOf:
+        - $ref: "#/components/schemas/Import"
+        - type: object
+          description: rows, groups, unparsed, operations — только в ready и done
+          properties:
+            reconciled: {type: boolean}
+            groups:
+              type: object
+              description: Число строк в каждой группе
+              properties:
+                ready: {type: integer}
+                needs_category: {type: integer}
+                possible_duplicate: {type: integer}
+                check: {type: integer}
+                exists: {type: integer}
+                imported: {type: integer}
+                income_transfer: {type: integer}
+                unparsed: {type: integer}
+            rows: {type: array, items: {$ref: "#/components/schemas/ImportRow"}}
+            unparsed:
+              type: array
+              description: Строки исходника с суммой, которые не вошли ни в одну подтверждённой строку
+              items:
+                type: object
+                properties:
+                  n: {type: integer}
+                  text: {type: string}
+            operations:
+              type: array
+              description: Готовые операции для POST /sync/push — строки группы ready, не skip и не записанные
+              items:
+                type: object
+                properties:
+                  uuid: {type: string, format: uuid, description: UUID v5 от отпечатка — повторная загрузка даёт тот же}
+                  row_id: {type: string, format: uuid}
+                  date: {type: string, example: "2026-09-12 12:00:00"}
+                  acc_fr_uuid: {type: string, format: uuid, description: Кошелёк импорта}
+                  acc_to_uuid: {type: string, format: uuid, description: Категория}
+                  amount: {type: string, example: "450.00"}
+                  comment: {type: string, maxLength: 255}
+
+    ImportRow:
+      type: object
+      properties:
+        row_id: {type: string, format: uuid}
+        group: {type: string, enum: [ready, needs_category, possible_duplicate, check, exists, imported, income_transfer]}
+        lines:
+          type: array
+          description: Строки-источники выписки
+          items:
+            type: object
+            properties:
+              n: {type: integer}
+              text: {type: string}
+        date: {type: string}
+        amount: {type: string}
+        dir: {type: string, enum: [expense, income, transfer]}
+        currency: {type: string}
+        description: {type: string}
+        pattern: {type: string, example: YANDEX*GO}
+        comment: {type: [string, "null"]}
+        category_uuid: {type: [string, "null"]}
+        source: {type: [string, "null"], enum: [rule, llm, user, manual, null]}
+        suggestion: {type: [string, "null"], description: Вариант модели ниже порога уверенности}
+        check: {type: [string, "null"], enum: [amount_not_in_text, date_not_in_text, currency_mismatch, null]}
+        match: {type: [string, "null"], enum: [exists, possible_duplicate, imported, null]}
+        match_candidates: {type: [array, "null"], items: {type: object}}
+        decision: {type: [string, "null"], enum: [include, skip, duplicate, null]}
+        edited: {type: boolean}
+        committed: {type: boolean}
