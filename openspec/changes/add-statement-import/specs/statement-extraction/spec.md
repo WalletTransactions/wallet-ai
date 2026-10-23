@@ -60,6 +60,14 @@ amount, dir, currency?, description}`, где `lines` — номера стро�
 `dir` — `expense`/`income`/`transfer`. Номер в `lines` — число перед «|», а не
 порядковый номер во фрагменте. Без рассуждений (`reasoning_effort: none`).
 
+#### Scenario: Ответ модели
+- **WHEN** фрагмент содержит «12.09 YANDEX*GO MOSCOW -450,00»
+- **THEN** модель возвращает `{lines: [17], date: "2026-09-12", amount: "450.00", dir: "expense", description: "YANDEX*GO MOSCOW"}`
+
+#### Scenario: Битый ответ
+- **WHEN** ответ не JSON или оборван по `max_tokens`
+- **THEN** фрагмент повторяется один раз, разрезанный пополам; не помогло — его строки с суммами уходят в «не разобрано»
+
 ### Requirement: Лимит ответа extract_rows
 `max_tokens` задания SHALL быть `200 + 100 × строк с суммой + символов
 фрагмента / 6`, но не больше места, что осталось в окне `LLM_CONTEXT` после
@@ -68,14 +76,6 @@ amount, dir, currency?, description}`, где `lines` — номера стро�
 #### Scenario: Фрагмент ТБанка
 - **WHEN** во фрагменте 1800 символов и 6 строк с суммой, `LLM_CONTEXT` — 8192, профиль 500 токенов
 - **THEN** `max_tokens` — 1100: формула меньше места в окне
-
-#### Scenario: Ответ модели
-- **WHEN** фрагмент содержит «12.09 YANDEX*GO MOSCOW -450,00»
-- **THEN** модель возвращает `{lines: [17], date: "2026-09-12", amount: "450.00", dir: "expense", description: "YANDEX*GO MOSCOW"}`
-
-#### Scenario: Битый ответ
-- **WHEN** ответ не JSON или оборван по `max_tokens`
-- **THEN** фрагмент повторяется один раз, разрезанный пополам; не помогло — его строки с суммами уходят в «не разобрано»
 
 ### Requirement: Проверка суммы
 Строка SHALL считаться подтверждённой по сумме, только если её `amount`
