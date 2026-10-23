@@ -3,6 +3,8 @@
 // Встроенные — файлы prompts/banks/*.txt, свои форматы пользователя — в базе.
 #pragma once
 
+#include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -18,6 +20,17 @@ struct Example {
     nlohmann::json expected;  // {date, amount, dir, currency?, description}
 };
 
+// Колонки CSV (секция [columns], D11): имена из строки заголовка.
+struct Columns {
+    char delimiter = ';';
+    std::string date;        // имя колонки
+    std::string date_format; // «DD-MM-YYYY HH:MM:SS»; время не разбирается
+    std::string amount;      // сумма со знаком
+    std::string description;
+    std::string type;        // необязательна; значения — в [types]
+    std::string currency;    // необязательна
+};
+
 struct Profile {
     std::string id;
     std::string name;
@@ -26,7 +39,21 @@ struct Profile {
     std::string hints;
     std::vector<Example> examples;      // до 3
     CheckRules check;
+    Columns columns;                           // date пусто — разбор только через LLM
+    std::map<std::string, std::string> types;  // тип (lower) → expense | income | transfer
 };
+
+// Строка данных CSV, разобранная по колонкам: candidate идёт в ту же проверку
+// D3, что и строка от модели.
+struct ColumnRow {
+    int line = 0; // номер строки в тексте, с 1
+    Candidate candidate;
+};
+
+// Разбор CSV по [columns] без LLM. nullopt — у профиля нет колонок или в
+// заголовке (первая непустая строка) нет нужной колонки: тогда импорт идёт
+// через LLM. Строки, где не разобрались дата или сумма, в ответ не попадают.
+std::optional<std::vector<ColumnRow>> parse_by_columns(const Profile& p, const std::vector<std::string>& lines);
 
 // Разбор файла профиля:
 //   # version: tinkoff-1
@@ -35,7 +62,9 @@ struct Profile {
 //   [signature]   — по строке на признак (подстрока, регистр не важен)
 //   [hints]       — текст подсказки модели
 //   [examples]    — строки выписки, затем строка «=> {json}»; до 3 примеров
-//   [check]       — stop_words: …, date_formats: …, expense_word: …
+//   [check]       — stop_words: …, date_formats: …, expense_word: …, transfer_words: …
+//   [columns]     — delimiter, date: Имя | DD-MM-YYYY, amount, description, type, currency
+//   [types]       — «Значение колонки type: expense|income|transfer»
 // Строки с # — комментарии. Ошибка формата — std::runtime_error.
 Profile parse_profile(const std::string& content);
 

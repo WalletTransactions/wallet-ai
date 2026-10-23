@@ -27,9 +27,9 @@ struct Amount {
     bool two_decimals = false; // «1 290,00», а не «36.6» или «4021»
 };
 
-// Даты «ДД.ММ.ГГГГ», «ДД.ММ.ГГ», «ДД.ММ», «ГГГГ-ММ-ДД», «12 сентября [2026]».
-// formats — разрешённые профилем (DD.MM.YYYY, DD.MM.YY, DD.MM, YYYY-MM-DD,
-// D MONTH); пусто — все.
+// Даты «ДД.ММ.ГГГГ» (и «ДД/ММ/ГГГГ»), «ДД.ММ.ГГ», «ДД-ММ-ГГГГ», «ДД.ММ»,
+// «ГГГГ-ММ-ДД», «12 сентября [2026]». formats — разрешённые профилем
+// (DD.MM.YYYY, DD.MM.YY, DD-MM-YYYY, DD.MM, YYYY-MM-DD, D MONTH); пусто — все.
 std::vector<Date> dates_in_line(const std::string& line, const std::vector<std::string>& formats = {});
 
 // Суммы строки; даты и время из неё перед этим вырезаются, чтобы «12.09» в
@@ -40,7 +40,8 @@ std::vector<Amount> amounts_in_line(const std::string& line);
 std::optional<long long> parse_amount(const std::string& s);
 std::string format_cents(long long cents); // 129000 → «1290.00»
 
-// Есть ли в строке денежная сумма — число с двумя знаками после разделителя.
+// Есть ли в строке денежная сумма — число с двумя знаками после разделителя
+// или строка начинается с даты и в ней есть ещё число («…;-31;EUR;…»).
 bool money_line(const std::string& line);
 
 // Строка — заголовок группы операций по дате («12 сентября 2026», «12.09.2026, суббота»).
@@ -61,6 +62,7 @@ struct CheckRules {
     std::vector<std::string> stop_words;
     std::vector<std::string> date_formats;
     std::string expense_word; // «Списание»: строка с этим словом — расход
+    std::vector<std::string> transfer_words; // «Перевод себе»: строка с этими словами — перевод
 };
 
 // Строка-кандидат от модели.

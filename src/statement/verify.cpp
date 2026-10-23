@@ -22,6 +22,17 @@ const std::regex& full_re() {
     static const std::regex re(R"((^|[^\d])(\d{1,2})[./](\d{1,2})[./](\d{4}|\d{2})(?!\d))");
     return re;
 }
+// «01-08-2026» — только с полным годом: «01-08-26» похоже на номер.
+// «01/08/2026» ловит full_re вместе с точками.
+const std::regex& dash_re() {
+    static const std::regex re(R"((^|[^\d-])(\d{1,2})-(\d{1,2})-(\d{4})(?![\d-]))");
+    return re;
+}
+// Строка начинается с полной даты (CSV «01-08-2026 15:58:01;…», выписка «12.09.2026 …»).
+const std::regex& leading_date_re() {
+    static const std::regex re(R"(^ *(\d{1,2}[./-]\d{1,2}[./-](\d{4}|\d{2})|\d{4}-\d{1,2}-\d{1,2})(?![\d.,]))");
+    return re;
+}
 const std::regex& iso_re() {
     static const std::regex re(R"((^|[^\d])(\d{4})-(\d{1,2})-(\d{1,2})(?!\d))");
     return re;
@@ -65,6 +76,7 @@ std::string prepare(const std::string& line) { return normalize_spaces(lower(lin
 // Вырезает даты и время, чтобы их цифры не стали суммами.
 std::string strip_dates(const std::string& s) {
     std::string out = std::regex_replace(s, full_re(), "$1 ");
+    out = std::regex_replace(out, dash_re(), "$1 ");
     out = std::regex_replace(out, iso_re(), "$1 ");
     out = std::regex_replace(out, month_re(), "$1 ");
     out = std::regex_replace(out, time_re(), " ");
@@ -161,6 +173,12 @@ std::vector<Date> dates_in_line(const std::string& line, const std::vector<std::
         Date d{year_of(m[4]), std::stoi(m[3]), std::stoi(m[2])};
         if (valid_md(d.m, d.d)) out.push_back(d);
     }
+    if (allowed(formats, "DD-MM-YYYY")) {
+        for (auto it = std::sregex_iterator(s.begin(), s.end(), dash_re()); it != std::sregex_iterator(); ++it) {
+            Date d{std::stoi((*it)[4]), std::stoi((*it)[3]), std::stoi((*it)[2])};
+            if (valid_md(d.m, d.d)) out.push_back(d);
+        }
+    }
     if (allowed(formats, "YYYY-MM-DD")) {
         for (auto it = std::sregex_iterator(s.begin(), s.end(), iso_re()); it != std::sregex_iterator(); ++it) {
             Date d{std::stoi((*it)[2]), std::stoi((*it)[3]), std::stoi((*it)[4])};
@@ -243,10 +261,12 @@ std::string format_cents(long long cents) {
 }
 
 bool money_line(const std::string& line) {
-    for (const auto& a : amounts_in_line(line)) {
+    auto amounts = amounts_in_line(line);
+    for (const auto& a : amounts) {
         if (a.two_decimals) return true;
     }
-    return false;
+    // Суммы без хвостовых нулей («-31», «-76.1»): строка с датой в начале и числом.
+    return !amounts.empty() && std::regex_search(normalize_spaces(line), leading_date_re());
 }
 
 bool is_date_header(const std::string& line) {
@@ -343,6 +363,10 @@ std::optional<Verified> verify_row(const Candidate& c, const VerifyContext& ctx)
     if (!ctx.rules.expense_word.empty() && v.dir == "income" &&
         contains_word(joined_lower, lower(ctx.rules.expense_word))) {
         v.dir = "expense";
+    }
+    // Переводы между своими счетами по словам профиля — сильнее знака.
+    for (const auto& w : ctx.rules.transfer_words) {
+        if (contains_word(joined_lower, lower(trim(w)))) v.dir = "transfer";
     }
 
     // Дата: в строках-источниках, в ближайшем заголовке выше или в контексте.
