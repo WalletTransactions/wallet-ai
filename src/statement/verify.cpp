@@ -298,6 +298,9 @@ bool is_date_header(const std::string& line) {
 }
 
 bool is_total_line(const std::string& line, const std::vector<std::string>& extra_stop_words) {
+    // Строка с датой в начале — операция («04.10.2026 … Проценты на остаток
+    // +16 721.85»), а не итог: иначе её пропуск моделью не виден в «не разобрано».
+    if (std::regex_search(normalize_spaces(line), leading_date_re())) return false;
     std::string s = lower(line);
     for (const char* w : {"итого", "остаток", "баланс"}) {
         if (contains_word(s, w)) return true;
