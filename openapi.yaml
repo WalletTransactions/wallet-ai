@@ -192,8 +192,12 @@ paths:
         кошелёк: готовые операции клиент шлёт в `POST /sync/push` сам.
 
         PDF без текстового слоя (скан) — импорт создаётся сразу в `failed`
-        с `failure: no_text`. Не больше одного импорта в работе на
-        пользователя и `AI_IMPORTS_MAX_ACTIVE` всего.
+        с `failure: no_text`; текст без единой строки с суммой (не выписка,
+        нечитаемая кодировка) — с `failure: no_operations`. CSV, для
+        которого есть встроенный профиль с колонками (Wirex), разбирается
+        кодом без LLM: импорт сразу переходит к категориям, `progress` разбора
+        нет. Не больше одного импорта в работе на пользователя и
+        `AI_IMPORTS_MAX_ACTIVE` всего.
       tags: [imports]
       requestBody:
         required: true
@@ -228,7 +232,7 @@ paths:
                 properties:
                   import_id: {type: string, format: uuid}
                   status: {type: string, enum: [queued, failed]}
-                  failure: {type: string, enum: [no_text]}
+                  failure: {type: string, enum: [no_text, no_operations]}
         "400":
           description: "`one_source`, `empty`, `unknown_wallet`, `unknown_profile`, `unsupported_file`, `bad_base64`, `bad_request`"
           content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
@@ -319,7 +323,7 @@ paths:
           description: Нет или чужой
           content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
         "409":
-          description: "`not_retryable` — не failed или no_text"
+          description: "`not_retryable` — не failed, `no_text` или `no_operations`"
           content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
         "429":
           description: "`import_in_progress`"
@@ -664,7 +668,7 @@ components:
       properties:
         import_id: {type: string, format: uuid}
         status: {type: string, enum: [queued, extracting, classifying, ready, done, failed, cancelled]}
-        failure: {type: [string, "null"], enum: [no_text, timeout, unavailable, null]}
+        failure: {type: [string, "null"], enum: [no_text, no_operations, timeout, unavailable, null]}
         wallet_uuid: {type: string, format: uuid}
         source_name: {type: string}
         created_at: {type: string, format: date-time}
