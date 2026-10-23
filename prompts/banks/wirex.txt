@@ -1,0 +1,35 @@
+# Профиль Wirex: CSV-выгрузка счёта из приложения (UTF-16LE без BOM, «;»).
+# Образец — tests/statements/wirex/statement_eur.csv. Разбирается по колонкам
+# без LLM (design D11); подсказки — на случай, если банк переименует колонку
+# и профиль уйдёт в разбор моделью.
+# ATM Withdrawal — перевод (наличные — тот же счёт пользователя), пока нет
+# отдельного кошелька наличных (открытый вопрос в design.md).
+# version: wirex-1
+id: wirex
+name: Wirex (CSV)
+
+[signature]
+completed date;type;description;amount;account currency
+
+[hints]
+CSV с разделителем «;». Колонки: дата и время, тип операции, описание, сумма со знаком, валюта счёта, курс, сумма в другой валюте, другая валюта, остаток. Последнее число строки — остаток, не сумма.
+Суммы без хвостовых нулей: «-31» — это 31.00. Exchange (обмен валют внутри Wirex), Money Sent, Bank Transfer, ATM Withdrawal — transfer.
+
+[check]
+date_formats: DD-MM-YYYY
+
+[columns]
+delimiter: ;
+date: Completed Date | DD-MM-YYYY HH:MM:SS
+amount: Amount
+description: Description
+type: Type
+currency: Account Currency
+
+[types]
+Card Payment: expense
+Fee: expense
+Exchange: transfer
+Money Sent: transfer
+Bank Transfer: transfer
+ATM Withdrawal: transfer

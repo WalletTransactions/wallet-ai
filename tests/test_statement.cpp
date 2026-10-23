@@ -2,6 +2,7 @@
 // профили, извлечение текста (openspec/changes/add-statement-import).
 #include <algorithm>
 #include <cstdio>
+#include <set>
 
 #include "llm_client.hpp"
 #include "statement/chunk.hpp"
@@ -206,8 +207,9 @@ TEST(chunks_cut_before_dates_and_carry_context) {
     CHECK_EQ(p2.back().last_line, 3);
 
     CHECK_EQ(numbered_text({"a", "b"}, 2, 2), std::string("2| b\n"));
-    CHECK_EQ(llm::rows_max_tokens(30), 2000);
-    CHECK_EQ(llm::rows_max_tokens(100), 2400);
+    CHECK_EQ(llm::rows_max_tokens(12, 1800), 1700);
+    CHECK_EQ(llm::rows_max_tokens(0, 0), 300);
+    CHECK_EQ(llm::rows_max_tokens(30, 1800), 2400);
 }
 
 TEST(pattern_and_fingerprint) {
@@ -275,7 +277,136 @@ TEST(profile_files_in_repo_load) {
         CHECK(!p.version.empty());
         CHECK(!p.signature.empty());
         CHECK(p.examples.size() <= 3u);
+        CHECK(estimate_tokens(profile_prompt(&p, {}, 10000)) <= 500u); // целиком в бюджет AI_PROFILE_MAX_TOKENS
     }
+    CHECK(find_profile(profiles, "tbank") != nullptr);
+    CHECK(find_profile(profiles, "wirex") != nullptr);
+}
+
+TEST(dash_dates_money_lines_and_transfer_words) {
+    auto d = dates_in_line("01-08-2026 15:58:01;Card Payment;X;-31;EUR;;;;2071.13;");
+    REQUIRE(d.size() == 1u);
+    CHECK_EQ(to_iso(d[0].y, d[0].m, d[0].d), std::string("2026-08-01"));
+    CHECK_EQ(dates_in_line("01/08/2026 X").size(), 1u);
+    CHECK(dates_in_line("01-08-2026", {"DD.MM.YYYY"}).empty());
+    CHECK(dates_in_line("01-08-26 X").empty()); // без полного года — не дата
+    CHECK(dates_in_line("2026-08-01").size() == 1u);
+    // Дата и время не становятся суммами; «-31» без копеек — сумма строки с датой.
+    CHECK(!has(cents("01-08-2026 15:58:01;Card Payment;X;-31;EUR;;;;2071;"), 2026));
+    CHECK(money_line("03-08-2026 13:21:40;Card Payment;X;-5;EUR;;;;149;"));
+    CHECK(!money_line("12.09.2026, суббота"));
+    CHECK(!money_line("Card 1111 : CAFE -5"));
+
+    std::vector<std::string> lines = {"19.10.2026 19.10.2026 +120 000.00 ₽ +120 000.00 ₽ Перевод себе 3841",
+                                      "15.10.2026 15.10.2026 -755.00 ₽ -755.00 ₽ Payment in Sdek0737 2223"};
+    auto ctx = ctx_for(lines);
+    ctx.rules.transfer_words = {"перевод себе"};
+    CHECK_EQ(verify_row({{1}, "2026-10-19", "120000.00", "income", "", "Перевод себе"}, ctx)->dir,
+             std::string("transfer"));
+    CHECK_EQ(verify_row({{2}, "2026-10-15", "755.00", "income", "", "Sdek"}, ctx)->dir, std::string("expense"));
+}
+
+TEST(utf16_csv_decoded) {
+    std::string le;
+    for (char c : std::string("Date;Amount\r\n01-08-2026;-31\r\n")) {
+        le.push_back(c);
+        le.push_back('\0');
+    }
+    CHECK_EQ(decode_text(le), std::string("Date;Amount\r\n01-08-2026;-31\r\n"));
+    CHECK_EQ(decode_text(std::string("\xFF\xFE\x14\x04" "a", 6)), std::string("Дa")); // BOM LE, «a\0»
+    CHECK_EQ(decode_text(std::string("\xFE\xFF\x04\x14\0" "a", 6)), std::string("Дa"));
+    CHECK_EQ(decode_text("plain"), std::string("plain"));
+}
+
+TEST(columns_profile_parses_csv) {
+    const char* text = "# version: c-1\nid: c\nname: C\n[signature]\ndate;type\n[columns]\ndelimiter: ;\n"
+                       "date: Date | DD-MM-YYYY HH:MM:SS\namount: Amount\ndescription: Desc\ntype: Type\n"
+                       "currency: Cur\n[types]\nCard Payment: expense\nExchange: transfer\n";
+    auto p = parse_profile(text);
+    CHECK_EQ(p.columns.date_format, std::string("DD-MM-YYYY HH:MM:SS"));
+    CHECK_EQ(p.types.size(), 2u);
+
+    // Колонки по имени: банк переставил их местами.
+    std::vector<std::string> lines = {"Type;Amount;Date;Desc;Cur;Balance",
+                                      "Card Payment;-31;01-08-2026 15:58:01;Card 1111 : CAFE,TOWN,MNE;eur;84.61",
+                                      "Card Payment;1.25;02-08-2026 10:00:00;\"GLOVO; refund\";EUR;85.86",
+                                      "Exchange;200;03-08-2026 13:02:29;Bought EUR;EUR;285.86",
+                                      "Top Up;-7;04-08-2026 09:00:00;Mystery;EUR;278.86",
+                                      "Card Payment;-3;31-02-2026 09:00:00;Bad date;EUR;275.86",
+                                      ""};
+    auto rows = parse_by_columns(p, lines);
+    REQUIRE(rows.has_value());
+    REQUIRE(rows->size() == 4u); // 31 февраля — не разобрана
+    const auto& r0 = (*rows)[0].candidate;
+    CHECK_EQ((*rows)[0].line, 2);
+    CHECK_EQ(r0.date, std::string("2026-08-01"));
+    CHECK_EQ(r0.amount, std::string("31.00"));
+    CHECK_EQ(r0.dir, std::string("expense"));
+    CHECK_EQ(r0.currency, std::string("EUR"));
+    CHECK_EQ((*rows)[1].candidate.dir, std::string("income")); // плюс у расхода — возврат
+    CHECK_EQ((*rows)[1].candidate.description, std::string("GLOVO; refund"));
+    CHECK_EQ((*rows)[2].candidate.dir, std::string("transfer"));
+    CHECK_EQ((*rows)[3].candidate.dir, std::string("expense")); // тип не из [types] — по знаку
+
+    // Нет колонки из профиля в заголовке — профиль по колонкам не применяется.
+    CHECK(!parse_by_columns(p, {"Type;Amount;Date;Description", "x"}).has_value());
+
+    bool threw = false;
+    try {
+        parse_profile("# version: x\nid: x\nname: X\n[signature]\nx\n[types]\nFee: expense\n");
+    } catch (const std::exception&) {
+        threw = true; // [types] без колонки type
+    }
+    CHECK(threw);
+}
+
+TEST(profile_examples_numbered_mid_statement) {
+    Profile p;
+    p.hints = "x";
+    p.examples = {{"12.09 KOFE -200,00", {{"date", "2026-09-12"}, {"amount", "200.00"}, {"dir", "expense"},
+                                           {"description", "KOFE"}}}};
+    auto prompt = profile_prompt(&p, {}, 500);
+    CHECK(prompt.find("37| 12.09 KOFE") != std::string::npos);
+    CHECK(prompt.find("\"lines\":[37]") != std::string::npos);
+    CHECK(prompt.find("1| ") == std::string::npos);
+}
+
+TEST(wirex_sample_by_columns) {
+    std::string dir = std::string(WALLET_AI_SOURCE_DIR);
+    auto profiles = load_profiles(dir + "/prompts/banks");
+    const auto* wirex = find_profile(profiles, "wirex");
+    REQUIRE(wirex != nullptr);
+    std::FILE* f = std::fopen((dir + "/tests/statements/wirex/statement_eur.csv").c_str(), "rb");
+    REQUIRE(f != nullptr);
+    std::string raw;
+    char buf[4096];
+    for (std::size_t n; (n = std::fread(buf, 1, sizeof(buf), f)) > 0;) raw.append(buf, n);
+    std::fclose(f);
+
+    auto lines = split_lines(decode_text(raw)); // UTF-16LE без BOM, как у банка
+    CHECK(matching_profiles(profiles, lines) == std::vector<std::string>{"wirex"});
+    auto rows = parse_by_columns(*wirex, lines);
+    REQUIRE(rows.has_value());
+    CHECK_EQ(rows->size(), 106u);
+
+    auto ctx = ctx_for(lines, "2026-10-23");
+    ctx.wallet_currency = "EUR";
+    ctx.period = find_period(lines);
+    ctx.rules = wirex->check;
+    std::set<int> covered;
+    int transfers = 0;
+    int refunds = 0;
+    for (const auto& r : *rows) {
+        auto v = verify_row(r.candidate, ctx);
+        REQUIRE(v.has_value());
+        CHECK_EQ(v->check, std::string(""));
+        covered.insert(v->lines.begin(), v->lines.end());
+        transfers += v->dir == "transfer" ? 1 : 0;
+        refunds += v->dir == "income" ? 1 : 0;
+    }
+    CHECK_EQ(transfers, 24 + 2 + 3 + 2); // Exchange, Bank Transfer, ATM Withdrawal, Money Sent
+    CHECK_EQ(refunds, 1);                // возврат по карте (Glovo)
+    CHECK(uncovered_lines(lines, 1, static_cast<int>(lines.size()), covered, ctx.rules.stop_words).empty());
 }
 
 TEST(source_files) {
@@ -317,7 +448,7 @@ TEST(rows_request_and_response) {
     r.wallet_currency = "RUB";
     r.profile = "Особенности: последняя колонка — остаток.";
     llm::CallOptions opts;
-    opts.max_tokens = llm::rows_max_tokens(1);
+    opts.max_tokens = llm::rows_max_tokens(1, r.numbered_text.size());
     auto body = llm::rows_request_body(r, real("extract_rows.txt"), "wallet-parse", opts);
     const auto& msgs = body["messages"];
     CHECK_EQ(msgs.size(), 2u);
@@ -328,7 +459,7 @@ TEST(rows_request_and_response) {
     CHECK(msgs[1]["content"].get<std::string>().find("17| 12.09 YANDEX*GO") != std::string::npos);
     CHECK(msgs[1]["content"].get<std::string>().find("12.09.2026") != std::string::npos);
     CHECK(body["response_format"]["json_schema"]["strict"].get<bool>());
-    CHECK_EQ(body["max_tokens"].get<int>(), 260);
+    CHECK_EQ(body["max_tokens"].get<int>(), 305);
     CHECK_EQ(body["reasoning_effort"].get<std::string>(), std::string("none"));
 
     auto ok = llm::parse_rows_response(200, completion(R"({"rows":[{"lines":[17],"date":"2026-09-12",
@@ -351,7 +482,7 @@ TEST(rows_request_and_response) {
     auto big_body = llm::rows_request_body(big, real("extract_rows.txt"), "m", opts);
     std::size_t prompt_tokens = estimate_tokens(big_body["messages"][0]["content"].get<std::string>()) +
                                 estimate_tokens(big_body["messages"][1]["content"].get<std::string>());
-    CHECK(prompt_tokens + static_cast<std::size_t>(llm::rows_max_tokens(30)) <= 4096u);
+    CHECK(prompt_tokens + static_cast<std::size_t>(llm::rows_max_tokens(12, 1800)) <= 4096u);
 }
 
 TEST(classify_request_and_response) {

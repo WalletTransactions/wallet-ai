@@ -41,11 +41,66 @@ void append_utf8(std::string& out, unsigned code) {
     } else if (code < 0x800) {
         out.push_back(static_cast<char>(0xC0 | (code >> 6)));
         out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
-    } else {
+    } else if (code < 0x10000) {
         out.push_back(static_cast<char>(0xE0 | (code >> 12)));
         out.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
         out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+    } else {
+        out.push_back(static_cast<char>(0xF0 | (code >> 18)));
+        out.push_back(static_cast<char>(0x80 | ((code >> 12) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
     }
+}
+
+// UTF-16 по BOM, а без BOM — по нулевым байтам через один (выгрузка Wirex:
+// UTF-16LE без BOM). 0 — не UTF-16, 1 — LE, 2 — BE.
+int utf16_kind(const std::string& s) {
+    if (s.size() >= 2) {
+        auto a = static_cast<unsigned char>(s[0]);
+        auto b = static_cast<unsigned char>(s[1]);
+        if (a == 0xFF && b == 0xFE) return 1;
+        if (a == 0xFE && b == 0xFF) return 2;
+    }
+    if (s.size() < 4 || s.size() % 2 != 0) return 0;
+    std::size_t n = std::min<std::size_t>(s.size(), 4096) / 2;
+    std::size_t zero_odd = 0;
+    std::size_t zero_even = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (s[2 * i] == '\0') ++zero_even;
+        if (s[2 * i + 1] == '\0') ++zero_odd;
+    }
+    // Латиница и цифры дают ноль в каждом втором байте; кириллица — нет,
+    // поэтому порог — треть символов, а у другого байта нулей почти нет.
+    if (zero_odd * 3 >= n && zero_even * 20 < n) return 1;
+    if (zero_even * 3 >= n && zero_odd * 20 < n) return 2;
+    return 0;
+}
+
+std::string utf16_to_utf8(const std::string& s, bool le) {
+    std::string out;
+    out.reserve(s.size());
+    std::size_t i = 0;
+    if (s.size() >= 2 && ((le && s.compare(0, 2, "\xFF\xFE") == 0) || (!le && s.compare(0, 2, "\xFE\xFF") == 0))) i = 2;
+    auto unit = [&](std::size_t at) -> unsigned {
+        auto lo = static_cast<unsigned char>(s[le ? at : at + 1]);
+        auto hi = static_cast<unsigned char>(s[le ? at + 1 : at]);
+        return (static_cast<unsigned>(hi) << 8) | lo;
+    };
+    for (; i + 1 < s.size(); i += 2) {
+        unsigned u = unit(i);
+        if (u >= 0xD800 && u < 0xDC00 && i + 3 < s.size()) {
+            unsigned low = unit(i + 2);
+            if (low >= 0xDC00 && low < 0xE000) {
+                append_utf8(out, 0x10000 + ((u - 0xD800) << 10) + (low - 0xDC00));
+                i += 2;
+                continue;
+            }
+        }
+        if (u >= 0xD800 && u < 0xE000) u = 0xFFFD;
+        append_utf8(out, u);
+    }
+    return out;
 }
 
 std::string extension_of(const std::string& name) {
@@ -87,6 +142,7 @@ std::string cp1251_to_utf8(const std::string& s) {
 }
 
 std::string decode_text(const std::string& bytes) {
+    if (int kind = utf16_kind(bytes); kind != 0) return utf16_to_utf8(bytes, kind == 1);
     std::string s = bytes;
     if (s.rfind("\xEF\xBB\xBF", 0) == 0) s.erase(0, 3);
     return valid_utf8(s) ? s : cp1251_to_utf8(s);

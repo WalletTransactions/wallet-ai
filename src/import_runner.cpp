@@ -107,6 +107,11 @@ void Runner::tick() {
 
 void Runner::step(stmt::ImportRec& imp, bool llm_ok, stmt::Epoch now) {
     const Config& cfg = service_.config();
+    if (imp.status == "extracting" && imp.progress_total == 0) {
+        // Разобран по колонкам профиля (D11): фрагментов нет, LLM для разбора не нужна.
+        finish_extraction(imp);
+        if (imp.status != "classifying") return;
+    }
     if (imp.status == "classifying" && !llm_ok) {
         // Разметка без LLM не нужна: строки остаются без категории (спека
         // statement-categorization, «ИИ недоступен во время разметки»).
@@ -308,7 +313,8 @@ parse_expense::Outcome Runner::extract(const jobs::Job& job) {
         req.wallet_currency = currency;
         req.profile = profile;
         llm::CallOptions opts = extract_opts_;
-        opts.max_tokens = llm::rows_max_tokens(stmt::money_lines(lines, first, last));
+        opts.max_tokens =
+            llm::rows_max_tokens(stmt::money_lines(lines, first, last), stmt::utf8_length(req.numbered_text));
         auto res = llm_.extract_rows(req, opts);
         tokens += res.completion_tokens;
         return res;

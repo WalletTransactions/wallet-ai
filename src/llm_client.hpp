@@ -167,8 +167,10 @@ nlohmann::json classify_request_body(const ClassifyRequest& r, const Prompt& pro
                                      const CallOptions& opts);
 ClassifyResult parse_classify_response(int http_status, const std::string& body);
 
-// max_tokens extract_rows: 60 на строку с суммой + 200, не больше 2400 (D4).
-int rows_max_tokens(int money_lines);
+// max_tokens extract_rows (D4): 200 + 100 на строку с суммой + символы
+// фрагмента / 6, не больше 2400. 100 — замер на ТБанке: LM Studio отдаёт JSON
+// с отступами, 85–100 токенов на операцию.
+int rows_max_tokens(int money_lines, std::size_t chunk_chars);
 
 class Client {
 public:

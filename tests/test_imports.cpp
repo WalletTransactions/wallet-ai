@@ -595,6 +595,53 @@ TEST(import_profiles_detect_and_manage) {
     CHECK(w.service->get({"u1", "t"}, second, false).body["profile"].is_null());
 }
 
+TEST(import_csv_by_columns_without_llm) {
+    auto prof = stmt::parse_profile("# version: c-1\nid: bankcsv\nname: CSV\n[signature]\ndate;type;desc;amount\n"
+                                    "[columns]\ndelimiter: ;\ndate: Date | DD.MM.YYYY\namount: Amount\n"
+                                    "description: Desc\ntype: Type\n[types]\nPay: expense\nSwap: transfer\n");
+    std::string csv = "Date;Type;Desc;Amount\n12.09.2026;Pay;YANDEX*GO;-450\n13.09.2026;Swap;To savings;-1000\n"
+                      "14.09.2026;Pay;KOFE;-200.5\n";
+    static const char* a = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string enc;
+    for (std::size_t i = 0; i < csv.size(); i += 3) {
+        unsigned n = static_cast<unsigned char>(csv[i]) << 16;
+        if (i + 1 < csv.size()) n |= static_cast<unsigned char>(csv[i + 1]) << 8;
+        if (i + 2 < csv.size()) n |= static_cast<unsigned char>(csv[i + 2]);
+        enc += a[(n >> 18) & 63];
+        enc += a[(n >> 12) & 63];
+        enc += i + 1 < csv.size() ? a[(n >> 6) & 63] : '=';
+        enc += i + 2 < csv.size() ? a[n & 63] : '=';
+    }
+    json file = {{"file", {{"name", "s.csv"}, {"content_base64", enc}}}};
+
+    // LLM недоступна: разбор по колонкам всё равно доходит до ready, строки без категорий.
+    World w({prof});
+    w.llm_ok = false;
+    auto r = w.create("u1", file);
+    REQUIRE(r.status == 202);
+    std::string id = r.body["import_id"];
+    CHECK_EQ(w.repo.chunks(id).size(), 0u);
+    w.drain();
+    CHECK(w.llm.rows_calls.empty());
+    auto v = w.service->get({"u1", "t"}, id, false).body;
+    CHECK_EQ(v["status"], "ready");
+    CHECK_EQ(v["profile"]["id"], "bankcsv");
+    auto rows = w.repo.rows(id);
+    REQUIRE(rows.size() == 3u);
+    CHECK_EQ(rows[1].dir, std::string("transfer"));
+    CHECK_EQ(rows[2].amount, std::string("200.50"));
+    for (const auto& row : rows) CHECK_EQ(row.check, std::string(""));
+    w.service->remove({"u1", "t"}, id);
+
+    // LLM есть: заданий extract_rows нет, только разметка категорий.
+    World w2({prof});
+    auto id2 = w2.create("u1", file).body["import_id"].get<std::string>();
+    w2.drain();
+    CHECK(w2.llm.rows_calls.empty());
+    CHECK_EQ(w2.llm.classify_calls, 1);
+    CHECK_EQ(w2.service->get({"u1", "t"}, id2, false).body["status"], "ready");
+}
+
 TEST(import_pdf_scan_fails_fast) {
     World w;
     // Пустой PDF-скан: импорт сразу failed: no_text.

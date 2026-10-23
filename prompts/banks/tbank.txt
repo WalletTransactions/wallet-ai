@@ -1,0 +1,31 @@
+# Профиль ТБанка (бывш. Тинькофф): PDF «Справка о движении средств» /
+# «Bank Statement» из приложения, русская и английская версии (JasperReports).
+# Образцы — statementExamples/TBank_*.pdf, 2026-10-23 (не в репозитории).
+# Примеры ниже обезличены: суммы, номера договоров и карт выдуманы.
+# version: tbank-1
+id: tbank
+name: ТБанк (PDF)
+
+[signature]
+tbank.ru
+127287
+
+[hints]
+Операция — 2–4 строки: первая с двумя датами, суммой (дважды, это одна операция) и началом описания; вторая — время; дальше — продолжение описания. Дата — первая в строке.
+4 цифры в конце первой строки — номер карты, не описание.
+«Перевод себе», «Внутренний перевод на договор», «Internal/Intrabank transfer» — transfer.
+«Пополнения:», «Расходы:», «Replenishment:», «Expenses:» — итоги.
+
+[examples]
+14.10.2026          14.10.2026          -2 480.00 ₽               -2 480.00 ₽              Внешний перевод по              1234
+18:30               18:31                                                                  номеру телефона
+                                                                                           +79000000000
+=> {"date":"2026-10-14","amount":"2480.00","dir":"expense","description":"Внешний перевод по номеру телефона +79000000000"}
+27.09.2026          28.09.2026            -412.00 ₽                    -412.00 ₽                    Payment in Ozon MOSCOW           5678
+22:35               04:12                                                                           RU
+=> {"date":"2026-09-27","amount":"412.00","dir":"expense","description":"Payment in Ozon MOSCOW RU"}
+
+[check]
+stop_words: пополнения:, расходы:, replenishment:, expenses:
+date_formats: DD.MM.YYYY
+transfer_words: перевод себе, внутренний перевод на, internal transfer to contract, intrabank transfer from

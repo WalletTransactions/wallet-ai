@@ -448,7 +448,10 @@ json chat_body(const std::string& model, const CallOptions& opts, const std::str
 
 } // namespace
 
-int rows_max_tokens(int money_lines) { return std::min(60 * std::max(money_lines, 1) + 200, 2400); }
+int rows_max_tokens(int money_lines, std::size_t chunk_chars) {
+    std::size_t n = 200 + 100 * static_cast<std::size_t>(std::max(money_lines, 1)) + chunk_chars / 6;
+    return static_cast<int>(std::min<std::size_t>(n, 2400));
+}
 
 json rows_request_body(const RowsRequest& r, const Prompt& prompt, const std::string& model, const CallOptions& opts) {
     std::string system = prompt.text;

@@ -253,7 +253,56 @@ Reply Service::create(const User& u, const json& body) {
         }
         if (!imp.profile_id.empty()) imp.profile_source = "auto";
     }
-    if (const auto* p = stmt::find_profile(profiles_, imp.profile_id)) imp.profile_version = p->version;
+    const stmt::Profile* builtin = stmt::find_profile(profiles_, imp.profile_id);
+    if (builtin != nullptr) imp.profile_version = builtin->version;
+
+    // CSV известного формата — по колонкам профиля, без заданий LLM (D11):
+    // строки сразу в базу, планировщик переходит к категориям.
+    std::optional<std::vector<stmt::ColumnRow>> by_columns;
+    if (csv && builtin != nullptr) by_columns = stmt::parse_by_columns(*builtin, lines);
+    if (by_columns) {
+        imp.status = "extracting";
+        imp.progress_total = 0;
+        repo_.create_import(imp, {});
+        stmt::VerifyContext ctx;
+        ctx.lines = &lines;
+        ctx.chunk_first = 1;
+        ctx.chunk_last = static_cast<int>(lines.size());
+        ctx.today = iso_date(imp.created_at);
+        ctx.period = period;
+        ctx.wallet_currency = currency;
+        ctx.rules = builtin->check;
+        int n = 0;
+        for (const auto& cr : *by_columns) {
+            auto v = stmt::verify_row(cr.candidate, ctx);
+            if (!v) continue;
+            stmt::RowRec r;
+            r.id = uuidgen::v4();
+            r.n = ++n;
+            r.lines = v->lines;
+            r.date = v->date;
+            r.amount = v->amount;
+            r.dir = v->dir;
+            r.currency = v->currency;
+            r.description = v->description;
+            r.pattern = stmt::pattern_of(v->description);
+            r.check = v->check;
+            r.classified = r.dir != "expense";
+            // Окончательные отпечатки — в finish_extraction, как у строк модели.
+            r.fingerprint = stmt::fingerprint(imp.wallet_uuid, r.date, r.amount, r.dir, r.pattern, 0);
+            r.op_uuid = stmt::op_uuid(r.fingerprint);
+            repo_.insert_row(imp.id, r);
+        }
+        applog::info("import created", {{"event", "import_created"},
+                                        {"import_id", imp.id},
+                                        {"chunks", 0},
+                                        {"lines", lines.size()},
+                                        {"by_columns", true},
+                                        {"profile", imp.profile_id},
+                                        {"profile_detect", imp.profile_detect}});
+        if (on_change) on_change();
+        return {202, {{"import_id", imp.id}, {"status", imp.status}}};
+    }
 
     // Профиль съедает часть контекста — фрагмент меньше на тот же бюджет.
     std::size_t profile_tokens = stmt::estimate_tokens(profile_prompt_for(imp));

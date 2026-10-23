@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -85,6 +86,7 @@ int run_statement(const llm::Config& cfg, const std::string& path, const std::st
     std::string profile_text;
     stmt::CheckRules rules;
     std::string profile_version = "none";
+    std::optional<std::vector<stmt::ColumnRow>> by_columns;
     if (!profile_path.empty()) {
         std::ifstream pf(profile_path, std::ios::binary);
         std::ostringstream pbuf;
@@ -93,14 +95,46 @@ int run_statement(const llm::Config& cfg, const std::string& path, const std::st
         profile_text = stmt::profile_prompt(&p, {}, 500);
         rules = p.check;
         profile_version = p.version;
+        if (ext == "csv") by_columns = stmt::parse_by_columns(p, lines);
     }
     std::size_t budget = stmt::estimate_tokens(profile_text) * 3;
     auto plans = stmt::plan_chunks(lines, chunk_chars > budget + 600 ? chunk_chars - budget : 600);
+    // CSV по колонкам профиля (D11) — без LLM и без фрагментов.
+    if (by_columns) plans.clear();
     auto period = stmt::find_period(lines);
 
     int verified = 0;
     int check_failed = 0;
     std::set<int> covered;
+    auto report = [&](const stmt::Verified& v) {
+        if (print_rows) {
+            std::cout << nlohmann::json{{"lines", v.lines}, {"date", v.date}, {"amount", v.amount},
+                                        {"dir", v.dir}, {"description", v.description}, {"check", v.check}}
+                             .dump(-1, ' ', false)
+                      << "\n";
+        }
+    };
+    if (by_columns) {
+        stmt::VerifyContext ctx;
+        ctx.lines = &lines;
+        ctx.chunk_first = 1;
+        ctx.chunk_last = static_cast<int>(lines.size());
+        ctx.today = today;
+        ctx.period = period;
+        ctx.wallet_currency = currency;
+        ctx.rules = rules;
+        for (const auto& r : *by_columns) {
+            auto v = stmt::verify_row(r.candidate, ctx);
+            if (!v) continue;
+            if (v->check.empty()) {
+                ++verified;
+                covered.insert(v->lines.begin(), v->lines.end());
+            } else {
+                ++check_failed;
+            }
+            report(*v);
+        }
+    }
     for (const auto& c : plans) {
         llm::RowsRequest req;
         req.numbered_text = stmt::numbered_text(lines, c.first_line, c.last_line);
@@ -110,7 +144,8 @@ int run_statement(const llm::Config& cfg, const std::string& path, const std::st
         req.wallet_currency = currency;
         req.profile = profile_text;
         llm::CallOptions opts;
-        opts.max_tokens = llm::rows_max_tokens(stmt::money_lines(lines, c.first_line, c.last_line));
+        opts.max_tokens = llm::rows_max_tokens(stmt::money_lines(lines, c.first_line, c.last_line),
+                                               stmt::utf8_length(req.numbered_text));
         opts.timeout_ms = 180000;
         auto r = client->extract_rows(req, opts);
         stmt::VerifyContext ctx;
@@ -133,12 +168,7 @@ int run_statement(const llm::Config& cfg, const std::string& path, const std::st
             } else {
                 ++bad;
             }
-            if (print_rows) {
-                std::cout << nlohmann::json{{"lines", v->lines}, {"date", v->date}, {"amount", v->amount},
-                                            {"dir", v->dir}, {"description", v->description}, {"check", v->check}}
-                                 .dump(-1, ' ', false)
-                          << "\n";
-            }
+            report(*v);
         }
         verified += ok;
         check_failed += bad;
@@ -156,6 +186,7 @@ int run_statement(const llm::Config& cfg, const std::string& path, const std::st
     int total = verified + check_failed + unparsed;
     auto share = [&](int n) { return total == 0 ? 0.0 : static_cast<int>(1000.0 * n / total) / 10.0; };
     std::cout << nlohmann::json{{"profile", profile_version},     {"chunks", plans.size()},
+                                {"by_columns", by_columns.has_value()},
                                 {"verified", verified},           {"check_failed", check_failed},
                                 {"unparsed", unparsed},           {"verified_pct", share(verified)},
                                 {"check_failed_pct", share(check_failed)}, {"unparsed_pct", share(unparsed)}}
