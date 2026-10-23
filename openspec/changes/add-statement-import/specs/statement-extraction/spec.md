@@ -60,7 +60,7 @@ amount, dir, currency?, description}`, где `lines` — номера стро�
 `dir` — `expense`/`income`/`transfer`. Номер в `lines` — число перед «|», а не
 порядковый номер во фрагменте. Без рассуждений (`reasoning_effort: none`),
 `max_tokens` — `200 + 100 × строк с суммой + символов фрагмента / 6`, но не
-больше 2400 (обоснование — design D4).
+больше места, что осталось в окне `LLM_CONTEXT` после промпта (design D4).
 
 #### Scenario: Ответ модели
 - **WHEN** фрагмент содержит «12.09 YANDEX*GO MOSCOW -450,00»

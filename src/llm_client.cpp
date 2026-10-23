@@ -448,9 +448,23 @@ json chat_body(const std::string& model, const CallOptions& opts, const std::str
 
 } // namespace
 
-int rows_max_tokens(int money_lines, std::size_t chunk_chars) {
+int rows_answer_room(int context, std::size_t profile_tokens, std::size_t chunk_tokens) {
+    long room = static_cast<long>(context) - kRowsSystemTokens - static_cast<long>(profile_tokens) -
+                static_cast<long>(chunk_tokens) - 64;
+    return static_cast<int>(std::max(room, 300L));
+}
+
+int rows_max_tokens(int money_lines, std::size_t chunk_chars, int answer_room) {
     std::size_t n = 200 + 100 * static_cast<std::size_t>(std::max(money_lines, 1)) + chunk_chars / 6;
-    return static_cast<int>(std::min<std::size_t>(n, 2400));
+    return static_cast<int>(std::min<std::size_t>(n, static_cast<std::size_t>(std::max(answer_room, 300))));
+}
+
+std::size_t extract_chunk_chars(std::size_t configured, std::size_t min_chars, int context,
+                                std::size_t profile_tokens) {
+    // Фрагмент из C символов — C/3 токенов промпта и до 2C/3 токенов ответа.
+    long free_tokens = static_cast<long>(context) - kRowsSystemTokens - static_cast<long>(profile_tokens) - 64;
+    std::size_t fit = free_tokens > 0 ? static_cast<std::size_t>(free_tokens) : 0;
+    return std::max(std::min(configured, fit), min_chars);
 }
 
 json rows_request_body(const RowsRequest& r, const Prompt& prompt, const std::string& model, const CallOptions& opts) {

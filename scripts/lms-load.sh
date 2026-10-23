@@ -10,7 +10,8 @@
 #   LMS_BIN          путь к lms                    (~/.lmstudio/bin/lms)
 #   LMS_MODEL_KEY    модель из `lms ls`            (google/gemma-4-e4b)
 #   LMS_IDENTIFIER   id в API = LLM_MODEL          (wallet-parse)
-#   LMS_CONTEXT      контекст, токенов             (4096)
+#   LMS_CONTEXT      контекст, токенов             (8192 — = LLM_CONTEXT wallet-ai;
+#                    gemma-4-e4b с ним ~4,8 ГБ из 8 на GTX 1070)
 #   LMS_GPU          доля на GPU: max/off/0..1     (max)
 #   LMS_PORT         порт сервера                  (1234)
 #   LMS_BIND         адрес сервера                 (0.0.0.0 — иначе из docker не достучаться;
@@ -23,7 +24,7 @@ set -euo pipefail
 LMS_BIN="${LMS_BIN:-$HOME/.lmstudio/bin/lms}"
 LMS_MODEL_KEY="${LMS_MODEL_KEY:-google/gemma-4-e4b}"
 LMS_IDENTIFIER="${LMS_IDENTIFIER:-wallet-parse}"
-LMS_CONTEXT="${LMS_CONTEXT:-4096}"
+LMS_CONTEXT="${LMS_CONTEXT:-8192}"
 LMS_GPU="${LMS_GPU:-max}"
 LMS_PORT="${LMS_PORT:-1234}"
 LMS_BIND="${LMS_BIND:-0.0.0.0}"

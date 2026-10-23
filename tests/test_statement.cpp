@@ -207,9 +207,16 @@ TEST(chunks_cut_before_dates_and_carry_context) {
     CHECK_EQ(p2.back().last_line, 3);
 
     CHECK_EQ(numbered_text({"a", "b"}, 2, 2), std::string("2| b\n"));
-    CHECK_EQ(llm::rows_max_tokens(12, 1800), 1700);
-    CHECK_EQ(llm::rows_max_tokens(0, 0), 300);
-    CHECK_EQ(llm::rows_max_tokens(30, 1800), 2400);
+    CHECK_EQ(llm::rows_max_tokens(12, 1800, 5000), 1700);
+    CHECK_EQ(llm::rows_max_tokens(0, 0, 5000), 300);
+    CHECK_EQ(llm::rows_max_tokens(30, 1800, 2400), 2400); // упёрлись в окно
+    // Окно 8192: профиль 500, фрагмент 600 токенов — ответу 6328.
+    CHECK_EQ(llm::rows_answer_room(8192, 500, 600), 6328);
+    CHECK_EQ(llm::rows_answer_room(4096, 500, 3000), 300);
+    // Фрагмент: настроенный, пока влезает с ответом; при 4096 профиль его урезает.
+    CHECK_EQ(llm::extract_chunk_chars(3500, 600, 8192, 500), 3500u);
+    CHECK_EQ(llm::extract_chunk_chars(3500, 600, 4096, 500), 2832u);
+    CHECK_EQ(llm::extract_chunk_chars(3500, 600, 1024, 500), 600u);
 }
 
 TEST(pattern_and_fingerprint) {
@@ -448,7 +455,7 @@ TEST(rows_request_and_response) {
     r.wallet_currency = "RUB";
     r.profile = "Особенности: последняя колонка — остаток.";
     llm::CallOptions opts;
-    opts.max_tokens = llm::rows_max_tokens(1, r.numbered_text.size());
+    opts.max_tokens = llm::rows_max_tokens(1, r.numbered_text.size(), 8000);
     auto body = llm::rows_request_body(r, real("extract_rows.txt"), "wallet-parse", opts);
     const auto& msgs = body["messages"];
     CHECK_EQ(msgs.size(), 2u);
@@ -482,7 +489,8 @@ TEST(rows_request_and_response) {
     auto big_body = llm::rows_request_body(big, real("extract_rows.txt"), "m", opts);
     std::size_t prompt_tokens = estimate_tokens(big_body["messages"][0]["content"].get<std::string>()) +
                                 estimate_tokens(big_body["messages"][1]["content"].get<std::string>());
-    CHECK(prompt_tokens + static_cast<std::size_t>(llm::rows_max_tokens(12, 1800)) <= 4096u);
+    int room = llm::rows_answer_room(4096, 500, estimate_tokens(big.numbered_text));
+    CHECK(prompt_tokens + static_cast<std::size_t>(llm::rows_max_tokens(30, 1800, room)) <= 4096u);
 }
 
 TEST(classify_request_and_response) {

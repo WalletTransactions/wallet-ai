@@ -34,7 +34,8 @@ namespace imports {
 
 struct Config {
     std::size_t chunk_chars = 1800;        // AI_EXTRACT_CHUNK_CHARS
-    std::size_t min_chunk_chars = 600;     // после вычета бюджета профиля
+    std::size_t min_chunk_chars = 600;     // если окно модели не вмещает настроенный
+    int llm_context = 8192;                // LLM_CONTEXT — окно модели в LM Studio (scripts/lms-load.sh)
     std::size_t max_chars = 300000;
     int max_chunks = 80;
     std::size_t file_max_bytes = 5u * 1024 * 1024;

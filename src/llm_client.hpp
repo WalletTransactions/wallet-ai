@@ -167,10 +167,24 @@ nlohmann::json classify_request_body(const ClassifyRequest& r, const Prompt& pro
                                      const CallOptions& opts);
 ClassifyResult parse_classify_response(int http_status, const std::string& body);
 
-// max_tokens extract_rows (D4): 200 + 100 на строку с суммой + символы
-// фрагмента / 6, не больше 2400. 100 — замер на ТБанке: LM Studio отдаёт JSON
-// с отступами, 85–100 токенов на операцию.
-int rows_max_tokens(int money_lines, std::size_t chunk_chars);
+// Окно модели делят системный промпт extract_rows (~700 токенов вместе со
+// схемой), профиль, фрагмент и ответ (D4). Оценка токенов — символы / 3.
+constexpr int kRowsSystemTokens = 700;
+
+// Сколько токенов ответа помещается в окно `context` (LLM_CONTEXT) после
+// промпта; не меньше 300.
+int rows_answer_room(int context, std::size_t profile_tokens, std::size_t chunk_tokens);
+
+// max_tokens extract_rows: 200 + 100 на строку с суммой + символы фрагмента
+// / 6, но не больше места в окне. 100 — замер на ТБанке: LM Studio отдаёт
+// JSON с отступами, 85–100 токенов на операцию.
+int rows_max_tokens(int money_lines, std::size_t chunk_chars, int answer_room);
+
+// Фрагмент, символов: настроенный (AI_EXTRACT_CHUNK_CHARS), но такой, чтобы
+// промпт с профилем и ответ на него (≈ 2 токена ответа на токен фрагмента)
+// поместились в окно; не меньше min_chars.
+std::size_t extract_chunk_chars(std::size_t configured, std::size_t min_chars, int context,
+                                std::size_t profile_tokens);
 
 class Client {
 public:

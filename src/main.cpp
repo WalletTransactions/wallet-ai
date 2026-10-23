@@ -108,6 +108,7 @@ void setup_imports(AppState& state, const std::string& prompt_dir, const std::st
 
     imports::Config cfg;
     cfg.chunk_chars = static_cast<std::size_t>(env_int("AI_EXTRACT_CHUNK_CHARS", 1800));
+    cfg.llm_context = env_int("LLM_CONTEXT", 8192);
     cfg.max_active = env_int("AI_IMPORTS_MAX_ACTIVE", 3);
     cfg.ttl_days = env_int("AI_IMPORT_TTL_DAYS", 90);
     cfg.done_ttl_days = env_int("AI_IMPORT_DONE_TTL_DAYS", 7);
