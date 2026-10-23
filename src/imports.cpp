@@ -306,9 +306,8 @@ Reply Service::create(const User& u, const json& body) {
 
     // Профиль съедает часть контекста — фрагмент меньше на тот же бюджет.
     std::size_t profile_tokens = stmt::estimate_tokens(profile_prompt_for(imp));
-    std::size_t chunk_chars = cfg_.chunk_chars > profile_tokens * 3 + cfg_.min_chunk_chars
-                                  ? cfg_.chunk_chars - profile_tokens * 3
-                                  : cfg_.min_chunk_chars;
+    std::size_t chunk_chars =
+        llm::extract_chunk_chars(cfg_.chunk_chars, cfg_.min_chunk_chars, cfg_.llm_context, profile_tokens);
     auto plans = stmt::plan_chunks(lines, chunk_chars);
     if (static_cast<int>(plans.size()) > cfg_.max_chunks) return error(413, "too_large");
 

@@ -16,6 +16,7 @@
 //   wallet_ai_llm_try --statement tests/statements/<bank>/sample.csv \
 //     [--profile prompts/banks/<bank>.txt] [--currency RUB] [--today 2026-10-22] \
 //     [--chunk-chars 1800] [--rows]
+//   Окно модели — LLM_CONTEXT (по умолчанию 8192, как в scripts/lms-load.sh).
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
@@ -57,7 +58,7 @@ std::string env_or(const char* key, const std::string& fallback) {
 // (openspec/changes/add-statement-import, задачи 4.2 и 4.11).
 int run_statement(const llm::Config& cfg, const std::string& path, const std::string& today,
                   const std::string& currency, const std::string& profile_path, std::size_t chunk_chars,
-                  bool print_rows) {
+                  int context, bool print_rows) {
     std::ifstream f(path, std::ios::binary);
     if (!f) {
         std::cerr << "нет файла " << path << "\n";
@@ -97,8 +98,8 @@ int run_statement(const llm::Config& cfg, const std::string& path, const std::st
         profile_version = p.version;
         if (ext == "csv") by_columns = stmt::parse_by_columns(p, lines);
     }
-    std::size_t budget = stmt::estimate_tokens(profile_text) * 3;
-    auto plans = stmt::plan_chunks(lines, chunk_chars > budget + 600 ? chunk_chars - budget : 600);
+    std::size_t profile_tokens = stmt::estimate_tokens(profile_text);
+    auto plans = stmt::plan_chunks(lines, llm::extract_chunk_chars(chunk_chars, 600, context, profile_tokens));
     // CSV по колонкам профиля (D11) — без LLM и без фрагментов.
     if (by_columns) plans.clear();
     auto period = stmt::find_period(lines);
@@ -144,8 +145,9 @@ int run_statement(const llm::Config& cfg, const std::string& path, const std::st
         req.wallet_currency = currency;
         req.profile = profile_text;
         llm::CallOptions opts;
-        opts.max_tokens = llm::rows_max_tokens(stmt::money_lines(lines, c.first_line, c.last_line),
-                                               stmt::utf8_length(req.numbered_text));
+        std::size_t chars = stmt::utf8_length(req.numbered_text);
+        opts.max_tokens = llm::rows_max_tokens(stmt::money_lines(lines, c.first_line, c.last_line), chars,
+                                               llm::rows_answer_room(context, profile_tokens, (chars + 2) / 3));
         opts.timeout_ms = 180000;
         auto r = client->extract_rows(req, opts);
         stmt::VerifyContext ctx;
@@ -253,7 +255,8 @@ int main(int argc, char** argv) {
     }
     if (!statement_path.empty()) {
         try {
-            return run_statement(cfg, statement_path, base.today, currency, profile_path, chunk_chars, print_rows);
+            return run_statement(cfg, statement_path, base.today, currency, profile_path, chunk_chars,
+                                 std::stoi(env_or("LLM_CONTEXT", "8192")), print_rows);
         } catch (const std::exception& e) {
             std::cerr << e.what() << "\n";
             return 2;

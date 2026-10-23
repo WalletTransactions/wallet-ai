@@ -313,8 +313,9 @@ parse_expense::Outcome Runner::extract(const jobs::Job& job) {
         req.wallet_currency = currency;
         req.profile = profile;
         llm::CallOptions opts = extract_opts_;
-        opts.max_tokens =
-            llm::rows_max_tokens(stmt::money_lines(lines, first, last), stmt::utf8_length(req.numbered_text));
+        std::size_t chars = stmt::utf8_length(req.numbered_text);
+        int room = llm::rows_answer_room(cfg.llm_context, stmt::estimate_tokens(profile), (chars + 2) / 3);
+        opts.max_tokens = llm::rows_max_tokens(stmt::money_lines(lines, first, last), chars, room);
         auto res = llm_.extract_rows(req, opts);
         tokens += res.completion_tokens;
         return res;
