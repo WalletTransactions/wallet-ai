@@ -51,6 +51,7 @@ public:
     bool duplicate = false;
     bool skip_first = false;
     std::vector<std::vector<int>> rows_calls;
+    std::string last_profile; // профиль из последнего extract_rows
     std::function<llm::ClassifyResult(const llm::ClassifyRequest&)> classify_fn;
     int classify_calls = 0;
 
@@ -60,6 +61,7 @@ public:
     llm::RowsResult extract_rows(const llm::RowsRequest& r, const llm::CallOptions&) override {
         llm::RowsResult out;
         out.status = llm::Status::Ok;
+        last_profile = r.profile;
         if (!rows_script.empty()) {
             out.status = rows_script.front();
             rows_script.erase(rows_script.begin());
@@ -402,14 +404,18 @@ TEST(import_delete_cancels_and_ttl) {
 
 TEST(import_rules_batches_and_classify_failure) {
     World w;
-    w.repo.upsert_rule("u1", "SHOP0", kCafe);
+    w.repo.upsert_rule("u1", "SHOPAA", kCafe);
     std::string text = "Выписка\n";
-    for (int i = 0; i < 35; ++i) text += "0" + std::to_string(1 + i % 9) + ".09.2026 SHOP" + std::to_string(i) + " -10,00\n";
+    // Имена без цифр в конце: «SHOP12» по D12 — номер магазина сети «SHOP».
+    for (int i = 0; i < 35; ++i) {
+        std::string name = std::string("SHOP") + static_cast<char>('A' + i / 26) + static_cast<char>('A' + i % 26);
+        text += "0" + std::to_string(1 + i % 9) + ".09.2026 " + name + " -10,00\n";
+    }
     std::string id = w.create_ok("u1", text);
     while (w.imp(id).status != "classifying") w.step();
     CHECK_EQ(w.imp(id).progress_total, 2); // 34 pattern без правила → 2 пачки по 20
     for (const auto& r : w.repo.rows(id)) {
-        if (r.pattern == "SHOP0") CHECK_EQ(r.category_source, std::string("rule"));
+        if (r.pattern == "SHOPAA") CHECK_EQ(r.category_source, std::string("rule"));
     }
     w.drain();
     CHECK_EQ(w.llm.classify_calls, 2);
@@ -595,6 +601,21 @@ TEST(import_profiles_detect_and_manage) {
     CHECK(w.service->get({"u1", "t"}, second, false).body["profile"].is_null());
 }
 
+TEST(import_profile_in_prompt_and_check) {
+    // Остаток против суммы решает подсказка профиля в промпте модели; код
+    // проверяет, что она туда дошла, и что знак из [check] перекрывает dir.
+    auto prof = stmt::parse_profile("# version: b-1\nid: bank\nname: Банк\n[signature]\nАО «Банк»\n"
+                                    "[hints]\nПоследняя колонка — остаток, не сумма.\n[check]\nexpense_word: Списание\n");
+    World w({prof});
+    auto id = w.create_ok("u1", "АО «Банк»\n12.09.2026 Списание KOFE 200,00\n13.09.2026 Зачисление ЗП 5 000,00\n");
+    w.drain();
+    CHECK(w.llm.last_profile.find("остаток") != std::string::npos);
+    auto rows = w.repo.rows(id);
+    REQUIRE(rows.size() == 2u);
+    CHECK_EQ(rows[0].dir, std::string("expense")); // FakeLlm без минуса вернул income
+    CHECK_EQ(rows[1].dir, std::string("income"));
+}
+
 TEST(import_csv_by_columns_without_llm) {
     auto prof = stmt::parse_profile("# version: c-1\nid: bankcsv\nname: CSV\n[signature]\ndate;type;desc;amount\n"
                                     "[columns]\ndelimiter: ;\ndate: Date | DD.MM.YYYY\namount: Amount\n"
@@ -640,6 +661,40 @@ TEST(import_csv_by_columns_without_llm) {
     CHECK(w2.llm.rows_calls.empty());
     CHECK_EQ(w2.llm.classify_calls, 1);
     CHECK_EQ(w2.service->get({"u1", "t"}, id2, false).body["status"], "ready");
+}
+
+TEST(import_without_operations_fails_fast) {
+    World w;
+    // Текст без единой строки с суммой: импорт сразу failed, текст не хранится.
+    auto r = w.create("u1", {{"text", "Уважаемый клиент!\nВаш договор 12345 от 01.09.2026\nСпасибо"}});
+    CHECK_EQ(r.status, 202);
+    CHECK_EQ(r.body["status"], "failed");
+    CHECK_EQ(r.body["failure"], "no_operations");
+    std::string id = r.body["import_id"];
+    CHECK(w.imp(id).source_text.empty());
+    CHECK_EQ(w.service->retry({"u1", "t"}, id).status, 409);
+    w.drain();
+    CHECK(w.llm.rows_calls.empty());
+
+    // CSV с профилем колонок, где ни одна строка не разобралась.
+    auto prof = stmt::parse_profile("# version: c-1\nid: bankcsv\nname: CSV\n[signature]\ndate;desc;amount\n"
+                                    "[columns]\ndelimiter: ;\ndate: Date | DD.MM.YYYY\namount: Amount\n"
+                                    "description: Desc\n");
+    World w2({prof});
+    std::string csv = "Date;Desc;Amount\nxx;Итого;\n";
+    std::string enc;
+    static const char* a = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for (std::size_t i = 0; i < csv.size(); i += 3) {
+        unsigned n = static_cast<unsigned char>(csv[i]) << 16;
+        if (i + 1 < csv.size()) n |= static_cast<unsigned char>(csv[i + 1]) << 8;
+        if (i + 2 < csv.size()) n |= static_cast<unsigned char>(csv[i + 2]);
+        enc += a[(n >> 18) & 63];
+        enc += a[(n >> 12) & 63];
+        enc += i + 1 < csv.size() ? a[(n >> 6) & 63] : '=';
+        enc += i + 2 < csv.size() ? a[n & 63] : '=';
+    }
+    auto r2 = w2.create("u1", {{"file", {{"name", "s.csv"}, {"content_base64", enc}}}});
+    CHECK_EQ(r2.body["failure"], "no_operations");
 }
 
 TEST(import_pdf_scan_fails_fast) {

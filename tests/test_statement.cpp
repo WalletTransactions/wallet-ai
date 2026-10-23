@@ -117,6 +117,7 @@ TEST(amounts_and_dates_in_line) {
     CHECK(money_line("Итого расходов: 45 300,00"));
     CHECK(is_total_line("Итого расходов: 45 300,00", {}));
     CHECK(is_total_line("Исходящий ОСТАТОК 10,00", {}));
+    CHECK(!is_total_line("04.10.2026 04.10.2026 +16 721.85 ₽ Проценты на остаток 3841", {}));
     CHECK(is_total_line("Кешбэк за месяц 120,00", {"кешбэк"}));
     CHECK(!money_line("APTEKA 36.6"));
 
@@ -224,6 +225,20 @@ TEST(pattern_and_fingerprint) {
     CHECK_EQ(pattern_of("PYATEROCHKA 1234 SANKT-PETERBU RUS"), std::string("PYATEROCHKA"));
     CHECK_EQ(pattern_of("Перевод Иванову"), std::string("ПЕРЕВОД ИВАНОВУ"));
     CHECK_EQ(pattern_of("APTEKA 36.6"), std::string("APTEKA 36.6"));
+    CHECK_EQ(pattern_of("APTEKA 36.6 MOSCOW RUS"), std::string("APTEKA 36.6"));
+    // Wirex: префикс карты, город и страна через запятую, номер магазина и кассы (D12).
+    CHECK_EQ(pattern_of("Card 7751 : AROMA 107 KASA 1,PODGORICA,MNE"), std::string("AROMA"));
+    CHECK_EQ(pattern_of("Card 7751 : AROMA 7 KASA 1,KOTOR,MNE"), std::string("AROMA"));
+    CHECK_EQ(pattern_of("Card 1111 : MARKETA41,NOVIGRAD,MNE"), pattern_of("Card 1111 : MARKETA10,NOVIGRAD,MNE"));
+    CHECK_EQ(pattern_of("Card 1111 : MARKETA41,NOVIGRAD,MNE"), std::string("MARKETA"));
+    CHECK_EQ(pattern_of("Card 1111 : Temu.com,Dublin 4,IRL"), std::string("TEMU.COM"));
+    CHECK_EQ(pattern_of("Card 1111 : DOBRA KUPOVINA KASA,STARIGRAD,MNE"), std::string("DOBRA KUPOVINA KASA"));
+    CHECK_EQ(pattern_of("Card 1111 : APOTEKA ZDRAVLJE 2,NOVIGRAD,MNE"), std::string("APOTEKA ZDRAVLJE"));
+    // Название с приклеенным номером остаётся, номер карты и договора — нет.
+    CHECK_EQ(pattern_of("Payment in Sdek0737 MOSCOW RU"), std::string("PAYMENT IN SDEK"));
+    CHECK_EQ(pattern_of("Внутренний перевод на договор 5107173931"), std::string("ВНУТРЕННИЙ ПЕРЕВОД НА ДОГОВОР"));
+    CHECK_EQ(pattern_of("Перевод себе 3841"), std::string("ПЕРЕВОД СЕБЕ"));
+    CHECK_EQ(pattern_of("TID12345 SHOP"), std::string("SHOP"));
 
     auto a = fingerprint("w", "2026-09-12", "200.00", "expense", "KOFE", 0);
     CHECK_EQ(a, fingerprint("w", "2026-09-12", "200.00", "expense", "KOFE", 0)); // та же выписка — тот же
@@ -376,6 +391,31 @@ TEST(profile_examples_numbered_mid_statement) {
     CHECK(prompt.find("37| 12.09 KOFE") != std::string::npos);
     CHECK(prompt.find("\"lines\":[37]") != std::string::npos);
     CHECK(prompt.find("1| ") == std::string::npos);
+}
+
+TEST(tbank_samples_detect_and_totals) {
+    std::string dir = std::string(WALLET_AI_SOURCE_DIR);
+    auto profiles = load_profiles(dir + "/prompts/banks");
+    const auto* tbank = find_profile(profiles, "tbank");
+    REQUIRE(tbank != nullptr);
+    for (auto [file, ops] : {std::pair{"statement_rus.txt", 20}, std::pair{"statement_eng.txt", 25}}) {
+        std::FILE* f = std::fopen((dir + "/tests/statements/tbank/" + file).c_str(), "rb");
+        REQUIRE(f != nullptr);
+        std::string raw;
+        char buf[4096];
+        for (std::size_t n; (n = std::fread(buf, 1, sizeof(buf), f)) > 0;) raw.append(buf, n);
+        std::fclose(f);
+        auto lines = split_lines(decode_text(raw));
+        // Русская и английская версии — один профиль.
+        CHECK(matching_profiles(profiles, lines) == std::vector<std::string>{"tbank"});
+        // Строка с суммой — первая строка операции; итоги — стоп-слова профиля.
+        CHECK_EQ(money_lines(lines, 1, static_cast<int>(lines.size())), ops + 2);
+        CHECK_EQ(uncovered_lines(lines, 1, static_cast<int>(lines.size()), {}, tbank->check.stop_words).size(),
+                 static_cast<std::size_t>(ops));
+        auto period = find_period(lines);
+        CHECK_EQ(period.from, std::string("2026-09-23"));
+        CHECK_EQ(period.to, std::string("2026-10-23"));
+    }
 }
 
 TEST(wirex_sample_by_columns) {

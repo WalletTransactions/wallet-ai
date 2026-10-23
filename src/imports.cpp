@@ -260,6 +260,19 @@ Reply Service::create(const User& u, const json& body) {
     // строки сразу в базу, планировщик переходит к категориям.
     std::optional<std::vector<stmt::ColumnRow>> by_columns;
     if (csv && builtin != nullptr) by_columns = stmt::parse_by_columns(*builtin, lines);
+
+    // Ни одной строки с суммой (или ни одной строки по колонкам) — не выписка
+    // или нечитаемая кодировка: сразу failed, а не пустой ready. Текст не храним.
+    if (by_columns ? by_columns->empty()
+                   : stmt::money_lines(lines, 1, static_cast<int>(lines.size())) == 0) {
+        imp.status = "failed";
+        imp.failure = "no_operations";
+        imp.source_text.clear();
+        repo_.create_import(imp, {});
+        count_import("failed");
+        applog::info("import has no operations", {{"event", "import_no_operations"}, {"import_id", imp.id}});
+        return {202, {{"import_id", imp.id}, {"status", imp.status}, {"failure", imp.failure}}};
+    }
     if (by_columns) {
         imp.status = "extracting";
         imp.progress_total = 0;
@@ -505,7 +518,9 @@ Reply Service::remove(const User& u, const std::string& id) {
 Reply Service::retry(const User& u, const std::string& id) {
     auto imp = repo_.get_import(id, u.user_id);
     if (!imp) return error(404, "импорта нет или он истёк");
-    if (imp->status != "failed" || imp->failure == "no_text") return error(409, "not_retryable");
+    if (imp->status != "failed" || imp->failure == "no_text" || imp->failure == "no_operations") {
+        return error(409, "not_retryable");
+    }
     for (const auto& other : repo_.active_imports()) {
         if (other.user_id == u.user_id) return {429, {{"error", "import_in_progress"}, {"import_id", other.id}}};
     }
