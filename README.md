@@ -76,12 +76,15 @@ curl "$GW/api/ai/jobs/$ID?wait=25" -H "Authorization: Bearer $T"
 
 1. `POST /api/ai/imports {wallet_uuid, text | file, profile?}` — текст или
    файл `.pdf` (с текстовым слоем, `pdftotext -layout`), `.csv`, `.txt`
-   (UTF-8 или Windows-1251) до 5 МБ в base64. Ответ сразу, разбор — в фоне.
-2. Текст режется на фрагменты (`AI_EXTRACT_CHUNK_CHARS`), каждый — фоновое
-   задание `extract_rows`: модель возвращает операции с номерами строк, код
-   проверяет, что сумма и дата буквально есть в этих строках
-   (`src/statement/verify.cpp`). Не прошла — `check`, строки с суммой без
-   операции — «не разобрано».
+   (UTF-8, UTF-16 или Windows-1251) до 5 МБ в base64. Ответ сразу, разбор —
+   в фоне. Скан — `failed: no_text`, текст без строк с суммой —
+   `failed: no_operations`.
+2. Текст режется на фрагменты (`AI_EXTRACT_CHUNK_CHARS`, по окну модели
+   `LLM_CONTEXT`), каждый — фоновое задание `extract_rows`: модель возвращает
+   операции с номерами строк, код проверяет, что сумма и дата буквально есть
+   в этих строках (`src/statement/verify.cpp`). Не прошла — `check`, строки с
+   суммой без операции — «не разобрано». CSV со встроенным профилем колонок
+   (`[columns]`/`[types]`, Wirex) разбирается кодом без LLM.
 3. Категории: правила пользователя (`merchant_rule`, растут из его правок),
    затем `classify_rows` — только описания продавцов и имена категорий,
    порог `AI_CLASSIFY_MIN_CONFIDENCE`.
@@ -90,10 +93,14 @@ curl "$GW/api/ai/jobs/$ID?wait=25" -H "Authorization: Bearer $T"
    операции с `uuid` v5 от отпечатка. Клиент шлёт их в `POST /sync/push` и
    отмечает `POST …/committed`.
 
-Профили формата — `prompts/banks/*.txt` (встроенные; секции `[signature]`,
-`[hints]`, `[examples]`, `[check]`, см. `src/statement/profiles.hpp`) и свои
-форматы пользователя: пример добавляется из каждой правки суммы, даты или
-направления, ключ — отпечаток строки заголовка колонок.
+Профили формата — `prompts/banks/*.txt` (встроенные: `tbank` — PDF ТБанка,
+`wirex` — CSV Wirex; секции `[signature]`, `[hints]`, `[examples]`, `[check]`
+с `stop_words`/`date_formats`/`expense_word`/`transfer_words`, `[columns]`,
+`[types]`, см. `src/statement/profiles.hpp`) и свои форматы пользователя:
+пример добавляется из каждой правки суммы, даты или направления, ключ —
+отпечаток строки заголовка колонок. Обезличенные образцы выписок —
+`tests/statements/<bank>/`; прогон без сервиса — `wallet_ai_llm_try
+--statement … --profile prompts/banks/<bank>.txt`.
 
 Фоновые задания идут после интерактивных: трата текстом ждёт не больше
 одного фрагмента. Импорт хранится в базе `ai` (`migrations/`, накат —
