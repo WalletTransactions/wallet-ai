@@ -249,3 +249,12 @@ ctest --test-dir build --output-on-failure
   `check_failed`, `unparsed` — качество извлечения на живых выписках;
 - `ai_statement_chunk_duration_seconds{result}` — разбор одного фрагмента;
 - `http_requests_total`, `http_request_duration_seconds` — как у всех сервисов.
+
+## Версия
+
+`GET /version`, строка лога при старте и `build_info` в `GET /metrics` —
+общая схема C++-сервисов проекта, см. [README google-auth, «Версия»](https://github.com/WalletTransactions/google-auth#версия).
+
+Релиз — git-тегами: `vX.Y.Z-rc.N` публикует образ в ghcr и выкатывает его
+в test, `vX.Y.Z` на том же коммите — тот же образ в prod; `X.Y.Z` должен
+совпадать с `VERSION`. Подробно — [README google-auth, «Версия»](https://github.com/WalletTransactions/google-auth#версия), «Релиз».

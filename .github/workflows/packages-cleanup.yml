@@ -1,0 +1,66 @@
+# Чистка старых версий образа сервиса в ghcr — чтобы не упереться в квоту
+# GitHub Packages (wallet-infra: openspec/changes/add-prod-test-environments,
+# design, «Квота GitHub Packages»).
+#
+# Правило:
+#   - версии с финальным тегом (X.Y.Z) не удаляются никогда — на любую из
+#     них может понадобиться откатить prod;
+#   - из остальных (только rc-теги или без тегов) остаются 10 самых новых.
+# Версия в ghcr — это манифест (digest) со всеми его тегами: rc, ставший
+# финальным, — та же версия, что и финальный тег, и тоже не удаляется.
+#
+# Удалять версии GITHUB_TOKEN может, только если у этого репозитория роль
+# Admin в настройках пакета (Package settings → Manage Actions access) —
+# пакет, созданный этим же репозиторием из Actions, получает её сам.
+name: Packages cleanup
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Только показать, что было бы удалено"
+        type: boolean
+        default: true
+
+permissions:
+  packages: write
+
+jobs:
+  cleanup:
+    name: Delete old rc versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Delete
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # По расписанию inputs пусты — это настоящая чистка.
+          DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
+          KEEP: "10"
+        run: |
+          org="$GITHUB_REPOSITORY_OWNER"
+          pkg="${GITHUB_REPOSITORY#*/}"
+          # API отдаёт версии от новых к старым.
+          gh api --paginate "/orgs/$org/packages/container/$pkg/versions" \
+              --jq '.[] | [.id, (.metadata.container.tags | join(","))] | @tsv' > versions.tsv
+          echo "Всего версий: $(wc -l < versions.tsv)"
+          kept=0
+          while IFS=$'\t' read -r id tags; do
+              if [[ ",$tags," =~ ,[0-9]+\.[0-9]+\.[0-9]+, ]]; then
+                  echo "keep  $id [$tags] — финальный"
+                  continue
+              fi
+              if (( kept < KEEP )); then
+                  kept=$((kept + 1))
+                  echo "keep  $id [$tags]"
+                  continue
+              fi
+              if [[ "$DRY_RUN" == "true" ]]; then
+                  echo "would delete $id [$tags]"
+              else
+                  echo "delete $id [$tags]"
+                  gh api --method DELETE "/orgs/$org/packages/container/$pkg/versions/$id"
+              fi
+          done < versions.tsv
