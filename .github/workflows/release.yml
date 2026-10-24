@@ -2,7 +2,7 @@
 # сервисов, см. README google-auth, раздел «Версия», и wallet-infra:
 # openspec/changes/add-prod-test-environments (design D3).
 #
-#   vX.Y.Z-rc.N — юнит-тесты, сборка, push ghcr.io/walletransactions/<сервис>:X.Y.Z-rc.N.
+#   vX.Y.Z-rc.N — юнит-тесты, сборка, push ghcr.io/wallettransactions/<сервис>:X.Y.Z-rc.N.
 #                 Jenkins (env-release-watch) выкатывает его в test.
 #   vX.Y.Z      — БЕЗ пересборки: манифест старшего vX.Y.Z-rc.* на этом же
 #                 коммите получает тег X.Y.Z (тот же digest). Jenkins
