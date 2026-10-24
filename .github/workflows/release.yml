@@ -130,25 +130,22 @@ jobs:
           echo "Финальный $GITHUB_REF_NAME ← $rc_tag"
           echo "tag=${rc_tag#v}" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: docker/setup-buildx-action@v3
-
-      # imagetools create с одним источником — точная копия манифеста под
-      # новым тегом, без пересборки и без изменения digest.
+      # skopeo (есть на раннере ubuntu-latest) копирует манифест байт в байт:
+      # --preserve-digests падает, если digest изменился бы. Не
+      # `docker buildx imagetools create` — тот заворачивает одиночный
+      # манифест в новый индекс с другим digest, и гейт prod его не узнает.
       - name: Tag rc image as final
         env:
           IMAGE: ${{ needs.meta.outputs.image }}
           VERSION: ${{ needs.meta.outputs.version }}
           RC: ${{ steps.rc.outputs.tag }}
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          docker buildx imagetools create -t "$IMAGE:$VERSION" "$IMAGE:$RC"
-          rc_digest="$(docker buildx imagetools inspect "$IMAGE:$RC" --format '{{.Manifest.Digest}}')"
-          final_digest="$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{.Manifest.Digest}}')"
+          echo "$TOKEN" | skopeo login ghcr.io -u "$ACTOR" --password-stdin
+          skopeo copy --preserve-digests "docker://$IMAGE:$RC" "docker://$IMAGE:$VERSION"
+          rc_digest="$(skopeo inspect --format '{{.Digest}}' "docker://$IMAGE:$RC")"
+          final_digest="$(skopeo inspect --format '{{.Digest}}' "docker://$IMAGE:$VERSION")"
           echo "$IMAGE:$RC      $rc_digest"
           echo "$IMAGE:$VERSION $final_digest"
           if [[ "$rc_digest" != "$final_digest" ]]; then
