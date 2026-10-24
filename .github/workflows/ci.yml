@@ -9,6 +9,13 @@ on:
   pull_request:
     paths-ignore: ["**.md"]
   workflow_dispatch:
+  # release.yml вызывает отсюда юнит-тесты перед публикацией rc-образа;
+  # сам образ он собирает и публикует сам, поэтому skip-image.
+  workflow_call:
+    inputs:
+      skip-image:
+        type: boolean
+        default: false
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -42,6 +49,7 @@ jobs:
 
   docker-image:
     name: Docker image
+    if: ${{ !inputs.skip-image }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

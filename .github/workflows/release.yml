@@ -1,0 +1,157 @@
+# Публикация образа сервиса в ghcr по git-тегу. Схема общая для всех
+# сервисов, см. README google-auth, раздел «Версия», и wallet-infra:
+# openspec/changes/add-prod-test-environments (design D3).
+#
+#   vX.Y.Z-rc.N — юнит-тесты, сборка, push ghcr.io/walletransactions/<сервис>:X.Y.Z-rc.N.
+#                 Jenkins (env-release-watch) выкатывает его в test.
+#   vX.Y.Z      — БЕЗ пересборки: манифест старшего vX.Y.Z-rc.* на этом же
+#                 коммите получает тег X.Y.Z (тот же digest). Jenkins
+#                 выкатывает его в prod, только если этот digest прошёл test.
+#                 Нет rc на коммите — workflow падает, образ не публикуется.
+#
+# X.Y.Z тега обязан совпадать с файлом VERSION — его же сервис отдаёт в
+# GET /version, по нему smoke после выката сверяет, что поднялось именно то.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+# Теги не отменяют друг друга: rc и финальный на одном коммите идут по очереди.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  meta:
+    name: Tag and VERSION
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+      rc: ${{ steps.parse.outputs.rc }}
+      image: ${{ steps.parse.outputs.image }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Parse tag
+        id: parse
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if [[ ! "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-rc\.([0-9]+))?$ ]]; then
+              echo "::error::тег $tag не vX.Y.Z и не vX.Y.Z-rc.N"
+              exit 1
+          fi
+          version="${BASH_REMATCH[1]}"
+          rc="${BASH_REMATCH[3]}"
+          file_version="$(tr -d '[:space:]' < VERSION)"
+          if [[ "$file_version" != "$version" ]]; then
+              echo "::error::тег $tag, а в VERSION — $file_version; поднимите VERSION и перевесьте тег"
+              exit 1
+          fi
+          {
+              echo "version=$version"
+              echo "rc=$rc"
+              echo "image=ghcr.io/${GITHUB_REPOSITORY,,}"
+          } >> "$GITHUB_OUTPUT"
+
+  tests:
+    name: Tests
+    needs: meta
+    if: needs.meta.outputs.rc != ''
+    uses: ./.github/workflows/ci.yml
+    with:
+      skip-image: true
+
+  rc-image:
+    name: Publish rc image
+    needs: [meta, tests]
+    if: needs.meta.outputs.rc != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Short commit
+        id: commit
+        run: echo "short=$(git rev-parse --short=8 HEAD)" >> "$GITHUB_OUTPUT"
+
+      # provenance: false — один обычный манифест, а не индекс с аттестацией:
+      # digest, который видит docker pull на хосте, совпадает с тем, что
+      # публикуется здесь, и финальный тег — его точная копия.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile
+          push: true
+          provenance: false
+          tags: ${{ needs.meta.outputs.image }}:${{ needs.meta.outputs.version }}-rc.${{ needs.meta.outputs.rc }}
+          build-args: |
+            GIT_COMMIT=${{ steps.commit.outputs.short }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.meta.outputs.version }}-rc.${{ needs.meta.outputs.rc }}
+
+  final-image:
+    name: Promote rc to final tag
+    needs: meta
+    if: needs.meta.outputs.rc == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Find rc on this commit
+        id: rc
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          rc_tag="$(git tag --points-at HEAD \
+              | grep -E "^v${VERSION//./\\.}-rc\.[0-9]+$" \
+              | sort -V | tail -n1 || true)"
+          if [[ -z "$rc_tag" ]]; then
+              echo "::error::на коммите $(git rev-parse --short HEAD) нет тега v${VERSION}-rc.N — финальный тег ставится только на коммит, прошедший test"
+              exit 1
+          fi
+          echo "Финальный $GITHUB_REF_NAME ← $rc_tag"
+          echo "tag=${rc_tag#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      # imagetools create с одним источником — точная копия манифеста под
+      # новым тегом, без пересборки и без изменения digest.
+      - name: Tag rc image as final
+        env:
+          IMAGE: ${{ needs.meta.outputs.image }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          RC: ${{ steps.rc.outputs.tag }}
+        run: |
+          docker buildx imagetools create -t "$IMAGE:$VERSION" "$IMAGE:$RC"
+          rc_digest="$(docker buildx imagetools inspect "$IMAGE:$RC" --format '{{.Manifest.Digest}}')"
+          final_digest="$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{.Manifest.Digest}}')"
+          echo "$IMAGE:$RC      $rc_digest"
+          echo "$IMAGE:$VERSION $final_digest"
+          if [[ "$rc_digest" != "$final_digest" ]]; then
+              echo "::error::digest финального тега не совпал с rc"
+              exit 1
+          fi
