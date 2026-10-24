@@ -69,7 +69,11 @@ jobs:
   rc-image:
     name: Publish rc image
     needs: [meta, tests]
-    if: needs.meta.outputs.rc != ''
+    # Не просто «tests прошёл»: у сервиса без юнит-тестов (wallet-report,
+    # wallet-gateway, wallet-web) все job'ы ci.yml при skip-image пропущены,
+    # и tests считается skipped — по умолчанию это пропустило бы и публикацию.
+    # Публикуем, если tests не упал и не отменён.
+    if: ${{ !failure() && !cancelled() && needs.meta.outputs.rc != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
