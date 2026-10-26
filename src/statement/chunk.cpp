@@ -9,9 +9,8 @@ namespace stmt {
 
 namespace {
 
-// Цена строки — длина того, что уйдёт в LLM (squeeze_spaces, как в numbered_text).
 std::size_t cost_of(const std::string& line) {
-    std::string t = squeeze_spaces(trim(line));
+    std::string t = trim(line);
     return !t.empty() && has_digit(t) ? utf8_length(t) : 0;
 }
 

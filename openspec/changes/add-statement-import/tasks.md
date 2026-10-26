@@ -48,7 +48,7 @@ wallet-infra/infra/db/.env`). Юнит-тесты — `tests/` с `FakeLlm`.
 ## 6. Планировщик импорта
 
 - [x] 6.1 `ImportRunner`: одно задание на импорт в очереди, круговой обход, пауза при неуспешной пробе LLM, `AI_IMPORT_PAUSE_MAX_MINS`, три таймаута фрагмента → `failed: timeout`, `retry`; проверка — тесты на чередование A1 B1 A2 и на паузу
-- [ ] 6.2 Возобновление при старте по `statement_chunk.status`; проверка — интеграционно: `docker compose restart wallet-ai` посреди разбора, импорт доходит до `ready` без повторных фрагментов
+- [x] 6.2 Возобновление при старте по `statement_chunk.status`; проверка — интеграционно: `docker compose restart wallet-ai` посреди разбора, импорт доходит до `ready` без повторных фрагментов
 - [x] 6.3 `expires_at` = создание + `AI_IMPORT_TTL_DAYS` (90), при `done` — min(сейчас + `AI_IMPORT_DONE_TTL_DAYS` (7), создание + 90); чистка раз в час; `DELETE` с отменой заданий; проверка — тест с подменённым временем: `ready` на 89-й день жив, на 91-й удалён; `done` удалён через 7 дней, `statement_imported` остался
 
 ## 7. Проверка и запись
@@ -59,7 +59,7 @@ wallet-infra/infra/db/.env`). Юнит-тесты — `tests/` с `FakeLlm`.
 
 ## 8. Наблюдаемость и документация
 
-- [ ] 8.1 Метрики `ai_statement_imports_total{status}`, `ai_statement_rows_total{result}`, `ai_statement_chunk_duration_seconds`; логи без текста и сумм; проверка — `/metrics` после прогона, `grep` логов на отсутствие сумм
+- [x] 8.1 Метрики `ai_statement_imports_total{status}`, `ai_statement_rows_total{result}`, `ai_statement_chunk_duration_seconds`; логи без текста и сумм; проверка — `/metrics` после прогона, `grep` логов на отсутствие сумм
 - [x] 8.2 `openapi.yaml` (все `/api/ai/imports*`, `/api/ai/statement-profiles*`, `features`), README (раздел «Импорт выписки», переменные окружения); проверка — `/docs` открывается, схемы совпадают с ответами
 - [x] 8.3 `org/docs/TODO_statement_import.md` и `TODO_wallet_ai.md` §10 шаг 6 — отступление от §1 (LLM извлекает строки) и выбор варианта «В»; проверка — документы ссылаются на этот change
 
@@ -86,6 +86,13 @@ wallet-infra/infra/db/.env`). Юнит-тесты — `tests/` с `FakeLlm`.
 
 ## 9. Живой прогон
 
-- [ ] 9.1 Три настоящие выписки (PDF одного банка, CSV другого, вставленный текст) через `curl` с токеном: доля `verified`, `check_failed`, `unparsed` записана в `design.md` → «Наблюдения после прогона»; проверка — суммы `ready` сходятся с итогом выписки за вычетом групп
-- [ ] 9.2 Трата текстом во время импорта ждёт не дольше одного фрагмента; проверка — замер `queue_ms`
+- [x] 9.1 Три настоящие выписки (PDF одного банка, CSV другого, вставленный текст) через `curl` с токеном: доля `verified`, `check_failed`, `unparsed` записана в `design.md` → «Наблюдения после прогона»; проверка — суммы `ready` сходятся с итогом выписки за вычетом групп
+- [x] 9.2 Трата текстом во время импорта ждёт не дольше одного фрагмента; проверка — замер `queue_ms`
 - [x] 9.3 `openspec validate add-statement-import --strict`; проверка — change валиден
+
+## 12. Профиль Weave Pay (2026-10-26)
+
+- [x] 12.1 `statement/verify`: даты с английским месяцем («26 Oct 2026», «3 Sept.», формат `D MON`), без учёта регистра; цифры такой даты не становятся суммами; проверка — тест `weavepay_sample_detect_and_dates`
+- [x] 12.2 `prompts/banks/weavepay.txt` (сигнатура — шапка выписки, `Declined` — стоп-слово, «Top up card balance» — transfer) и обезличенный образец `tests/statements/weavepay/`; проверка — автоопределение и подсчёт строк с суммой в тесте
+- [x] 12.3 `numbered_text` и примеры профиля сжимают пробелы выравнивания до двух (`squeeze_spaces`), нарезка фрагментов прежняя; проверка — тест `numbered_text`, ТБанк rus 20/20 за 56 с (было 63 с)
+- [x] 12.4 Прогон Weave Pay через LLM — результат слабый, решено оставить (design «Наблюдения после прогона»)

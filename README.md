@@ -94,7 +94,7 @@ curl "$GW/api/ai/jobs/$ID?wait=25" -H "Authorization: Bearer $T"
    отмечает `POST …/committed`.
 
 Профили формата — `prompts/banks/*.txt` (встроенные: `tbank` — PDF ТБанка,
-`wirex` — CSV Wirex; секции `[signature]`, `[hints]`, `[examples]`, `[check]`
+`wirex` — CSV Wirex, `weavepay` — PDF Weave Pay (разбор слабый, см. design); секции `[signature]`, `[hints]`, `[examples]`, `[check]`
 с `stop_words`/`date_formats`/`expense_word`/`transfer_words`, `[columns]`,
 `[types]`, см. `src/statement/profiles.hpp`) и свои форматы пользователя:
 пример добавляется из каждой правки суммы, даты или направления, ключ —
