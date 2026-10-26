@@ -268,6 +268,11 @@ TEST(import_full_flow_to_ready) {
     CHECK_EQ(op["acc_to_uuid"], kTaxi);
     CHECK_EQ(op["date"].get<std::string>().substr(10), " 12:00:00");
     CHECK_EQ(w.llm.classify_calls, 1);
+    auto list = w.service->list({"u1", "t"}).body["imports"];
+    REQUIRE(list.size() == 1u);
+    CHECK_EQ(list[0]["counts"]["rows"], 7);
+    CHECK_EQ(list[0]["counts"]["ready"], 6);
+    CHECK_EQ(list[0]["counts"]["committed"], 0);
 }
 
 TEST(import_round_robin_and_resume) {

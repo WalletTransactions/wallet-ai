@@ -146,7 +146,7 @@ Access-токен google-auth (Bearer или cookie `session`), подпись �
 | `AI_IMPORT_PAUSE_MAX_MINS` | `60` | сколько ждать LLM, прежде чем `failed: unavailable` |
 | `AI_CLASSIFY_MIN_CONFIDENCE` | `0.7` | ниже — категория только подсказкой (`suggestion`) |
 | `AI_PROFILE_MAX_TOKENS` | `500` | бюджет профиля формата в промпте; фрагмент урезается, только если с профилем и ответом не влезает в `LLM_CONTEXT` |
-| `AI_JOB_TIMEOUT_SECS_EXTRACT_ROWS` / `…_CLASSIFY_ROWS` | `180` / `60` | дедлайн вызова LLM |
+| `AI_JOB_TIMEOUT_SECS_EXTRACT_ROWS` / `AI_JOB_TIMEOUT_SECS_CLASSIFY_ROWS` | `180` / `60` | дедлайн вызова LLM |
 | `LLM_MAX_TOKENS_CLASSIFY_ROWS` | `1024` | у `extract_rows` — 200 + 100 на строку с суммой + символы / 6, не больше места в `LLM_CONTEXT` после промпта |
 | `PORT` / `HOST` | `8087` / `127.0.0.1` | |
 | `LOG_DIR` / `LOG_LEVEL` | stdout / debug | |

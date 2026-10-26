@@ -692,6 +692,13 @@ components:
             name: {type: string}
             source: {type: string, enum: [auto, manual]}
         profile_detect: {type: [string, "null"], enum: [none, ambiguous, null]}
+        counts:
+          type: object
+          description: Только в списке (GET /api/ai/imports) и только в ready/done; без сверки с внесёнными
+          properties:
+            rows: {type: integer, description: Всего строк импорта}
+            ready: {type: integer, description: Готовы к записи (группа ready, не skip, не записаны)}
+            committed: {type: integer, description: Записаны}
 
     ImportDetail:
       allOf:

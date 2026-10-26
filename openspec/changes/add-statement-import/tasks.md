@@ -60,7 +60,7 @@ wallet-infra/infra/db/.env`). Юнит-тесты — `tests/` с `FakeLlm`.
 ## 8. Наблюдаемость и документация
 
 - [ ] 8.1 Метрики `ai_statement_imports_total{status}`, `ai_statement_rows_total{result}`, `ai_statement_chunk_duration_seconds`; логи без текста и сумм; проверка — `/metrics` после прогона, `grep` логов на отсутствие сумм
-- [ ] 8.2 `openapi.yaml` (все `/api/ai/imports*`, `/api/ai/statement-profiles*`, `features`), README (раздел «Импорт выписки», переменные окружения); проверка — `/docs` открывается, схемы совпадают с ответами
+- [x] 8.2 `openapi.yaml` (все `/api/ai/imports*`, `/api/ai/statement-profiles*`, `features`), README (раздел «Импорт выписки», переменные окружения); проверка — `/docs` открывается, схемы совпадают с ответами
 - [x] 8.3 `org/docs/TODO_statement_import.md` и `TODO_wallet_ai.md` §10 шаг 6 — отступление от §1 (LLM извлекает строки) и выбор варианта «В»; проверка — документы ссылаются на этот change
 
 ## 10. Правки по образцу Wirex (2026-10-23, design D4, D11, D12)
@@ -88,4 +88,4 @@ wallet-infra/infra/db/.env`). Юнит-тесты — `tests/` с `FakeLlm`.
 
 - [ ] 9.1 Три настоящие выписки (PDF одного банка, CSV другого, вставленный текст) через `curl` с токеном: доля `verified`, `check_failed`, `unparsed` записана в `design.md` → «Наблюдения после прогона»; проверка — суммы `ready` сходятся с итогом выписки за вычетом групп
 - [ ] 9.2 Трата текстом во время импорта ждёт не дольше одного фрагмента; проверка — замер `queue_ms`
-- [ ] 9.3 `openspec validate add-statement-import --strict`; проверка — change валиден
+- [x] 9.3 `openspec validate add-statement-import --strict`; проверка — change валиден

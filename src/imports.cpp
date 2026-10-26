@@ -347,7 +347,22 @@ Reply Service::create(const User& u, const json& body) {
 
 Reply Service::list(const User& u) {
     json items = json::array();
-    for (const auto& imp : repo_.list_imports(u.user_id)) items.push_back(view(imp, nullptr, false));
+    for (const auto& imp : repo_.list_imports(u.user_id)) {
+        json item = view(imp, nullptr, false);
+        if (imp.status == "ready" || imp.status == "done") {
+            // Для строки списка «готово: 47 операций» / «записано 31» — без
+            // сверки (её делает только GET /imports/{id}).
+            int ready = 0;
+            int committed = 0;
+            auto rows = repo_.rows(imp.id);
+            for (const auto& r : rows) {
+                if (r.committed) ++committed;
+                else if (group_of(r) == "ready" && r.decision != "skip") ++ready;
+            }
+            item["counts"] = {{"rows", rows.size()}, {"ready", ready}, {"committed", committed}};
+        }
+        items.push_back(std::move(item));
+    }
     return {200, {{"imports", items}}};
 }
 
