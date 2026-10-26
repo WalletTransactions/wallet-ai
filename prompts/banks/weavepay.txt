@@ -1,0 +1,32 @@
+# Профиль Weave Pay (weavepay.io): PDF «Card **** NNNN … through …» — выписка
+# по карте, английская. Образцы — statementExamples/weave_pay*.pdf, 2026-10-26
+# (не в репозитории). Текст после pdftotext -layout: поверх таблицы водяной
+# знак «This is not an official statement» рассыпан по строкам отдельными
+# буквами, а строки таблицы иногда разорваны на две-три.
+# Примеры ниже обезличены: продавцы и суммы выдуманы.
+# version: weavepay-1
+id: weavepay
+name: Weave Pay (PDF)
+
+[signature]
+weavepay id:
+mermaid house, 2 puddle dock
+
+[hints]
+Колонки: Date | Merchant | Status | Payment amount | Charged amount. Сумма — Charged amount (обычно равна Payment amount), валюта EUR, «€ -12.30» — расход.
+Строка бывает разорвана: дата и продавец на одной строке, статус и суммы на следующих. Если подряд две даты, потом два продавца и две пары сумм — сопоставь их по порядку.
+Одиночные буквы и обрывки слов («Th», «i s», «off», «ls») — водяной знак, не текст операции.
+Status «Declined» — отклонено, не операция. «Pending» и «Approved» — операции.
+«Top up card balance» — пополнение карты со своего счёта, transfer.
+
+[examples]
+21 Oct 2026       SHOPNAME41
+                                                            Approved             € -14.20              € -14.20
+=> {"date":"2026-10-21","amount":"14.20","dir":"expense","description":"SHOPNAME41"}
+24 Sep 2026       Top up card balance                       Approved           € 1,200.00             € 1,200.00
+=> {"date":"2026-09-24","amount":"1200.00","dir":"transfer","description":"Top up card balance"}
+
+[check]
+stop_words: declined, page, generated on
+date_formats: D MON
+transfer_words: top up card balance

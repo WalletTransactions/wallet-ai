@@ -208,6 +208,9 @@ TEST(chunks_cut_before_dates_and_carry_context) {
     CHECK_EQ(p2.back().last_line, 3);
 
     CHECK_EQ(numbered_text({"a", "b"}, 2, 2), std::string("2| b\n"));
+    // Пробелы выравнивания pdftotext -layout сжимаются до двух — для LLM.
+    CHECK_EQ(numbered_text({"26 Oct 2026      VOLI41          Approved     € -9.87   "}, 1, 1),
+             std::string("1| 26 Oct 2026  VOLI41  Approved  € -9.87\n"));
     CHECK_EQ(llm::rows_max_tokens(12, 1800, 5000), 1700);
     CHECK_EQ(llm::rows_max_tokens(0, 0, 5000), 300);
     CHECK_EQ(llm::rows_max_tokens(30, 1800, 2400), 2400); // упёрлись в окно
@@ -416,6 +419,40 @@ TEST(tbank_samples_detect_and_totals) {
         CHECK_EQ(period.from, std::string("2026-09-23"));
         CHECK_EQ(period.to, std::string("2026-10-23"));
     }
+}
+
+TEST(weavepay_sample_detect_and_dates) {
+    std::string dir = std::string(WALLET_AI_SOURCE_DIR);
+    auto profiles = load_profiles(dir + "/prompts/banks");
+    const auto* weave = find_profile(profiles, "weavepay");
+    REQUIRE(weave != nullptr);
+    std::FILE* f = std::fopen((dir + "/tests/statements/weavepay/statement.txt").c_str(), "rb");
+    REQUIRE(f != nullptr);
+    std::string raw;
+    char buf[4096];
+    for (std::size_t n; (n = std::fread(buf, 1, sizeof(buf), f)) > 0;) raw.append(buf, n);
+    std::fclose(f);
+    auto lines = split_lines(decode_text(raw));
+    CHECK(matching_profiles(profiles, lines) == std::vector<std::string>{"weavepay"});
+
+    // «26 Oct 2026» — английский месяц; цифры даты не становятся суммами.
+    auto d = dates_in_line("26 Oct 2026       HPBULICASLOBODE   Pending   € -955.88   € -955.88", weave->check.date_formats);
+    REQUIRE(d.size() == 1u);
+    CHECK_EQ(to_iso(d[0].y, d[0].m, d[0].d), std::string("2026-10-26"));
+    CHECK(dates_in_line("3 September", {"D MON"})[0].m == 9);
+    CHECK(dates_in_line("12 сентября 2026", {"D MON"}).empty());
+    CHECK(dates_in_line("26 Octopus 2026").empty());
+    auto a = amounts_in_line("26 Oct 2026  X  Approved  € 1,000.00  € 1,000.00");
+    REQUIRE(!a.empty());
+    CHECK_EQ(a[0].cents, 100000LL);
+    for (const auto& x : a) CHECK(x.cents != 2600LL && x.cents != 202600LL); // «26», «2026» — дата, не сумма
+
+    // 18 строк таблицы: 16 операций и 2 отклонённых. Строк с суммами 22 — у
+    // разорванных операций суммы на своих строках. Отклонённая со статусом и
+    // суммами на одной строке — стоп-слово «declined»; у второй суммы ушли на
+    // отдельную строку без статуса, её стоп-слово не ловит.
+    CHECK_EQ(money_lines(lines, 1, static_cast<int>(lines.size())), 22);
+    CHECK_EQ(uncovered_lines(lines, 1, static_cast<int>(lines.size()), {}, weave->check.stop_words).size(), 21u);
 }
 
 TEST(wirex_sample_by_columns) {

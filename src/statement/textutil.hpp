@@ -15,6 +15,11 @@ std::string lower(const std::string& s);
 // Неразрывный (U+00A0), узкий неразрывный (U+202F) и тонкий (U+2009) пробелы
 // и табуляция — в обычный пробел.
 std::string normalize_spaces(const std::string& s);
+// normalize_spaces, затем серии из 3+ пробелов → два, хвостовые пробелы убраны:
+// текст для LLM. pdftotext -layout выравнивает колонки пробелами, и строка
+// таблицы на 80 % из них состоит — это токены и время генерации. Двух пробелов
+// хватает, чтобы колонки читались раздельно.
+std::string squeeze_spaces(const std::string& s);
 
 std::string trim(const std::string& s);
 

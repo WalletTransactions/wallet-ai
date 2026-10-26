@@ -28,8 +28,8 @@ struct Amount {
 };
 
 // Даты «ДД.ММ.ГГГГ» (и «ДД/ММ/ГГГГ»), «ДД.ММ.ГГ», «ДД-ММ-ГГГГ», «ДД.ММ»,
-// «ГГГГ-ММ-ДД», «12 сентября [2026]». formats — разрешённые профилем
-// (DD.MM.YYYY, DD.MM.YY, DD-MM-YYYY, DD.MM, YYYY-MM-DD, D MONTH); пусто — все.
+// «ГГГГ-ММ-ДД», «12 сентября [2026]», «26 Oct 2026». formats — разрешённые профилем
+// (DD.MM.YYYY, DD.MM.YY, DD-MM-YYYY, DD.MM, YYYY-MM-DD, D MONTH, D MON); пусто — все.
 std::vector<Date> dates_in_line(const std::string& line, const std::vector<std::string>& formats = {});
 
 // Суммы строки; даты и время из неё перед этим вырезаются, чтобы «12.09» в

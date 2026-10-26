@@ -14,6 +14,9 @@ namespace {
 const char* const kMonths[] = {"января", "февраля", "марта",    "апреля",  "мая",    "июня",
                                "июля",   "августа", "сентября", "октября", "ноября", "декабря"};
 
+// Английские месяцы — по первым трём буквам («26 Oct 2026», «3 September»; Weave Pay).
+const char* const kMonthsEn[] = {"jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"};
+
 const char* const kWeekdays[] = {"понедельник", "вторник", "среда", "среду", "четверг", "пятница", "пятницу",
                                  "суббота", "субботу", "воскресенье", "пн", "вт", "ср", "чт", "пт", "сб", "вс",
                                  "сегодня", "вчера", "г", "года"};
@@ -44,6 +47,15 @@ const std::regex& ddmm_re() {
 const std::regex& month_re() {
     static const std::regex re(
         R"((^|[^\d])(\d{1,2}) (января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)( (\d{4}))?)");
+    return re;
+}
+// Без учёта регистра: strip_dates получает строку как есть, а dates_in_line — в
+// нижнем регистре. Месяц — три буквы или полное имя («Oct», «October», «Sept.»).
+const std::regex& month_en_re() {
+    static const std::regex re(
+        R"((^|[^\d])(\d{1,2}) (jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec))"
+        R"((?:uary|ruary|ch|il|e|y|ust|t|tember|ober|ember)?\.?(,? (\d{4}))?(?![a-z\d]))",
+        std::regex::ECMAScript | std::regex::icase);
     return re;
 }
 const std::regex& time_re() {
@@ -79,6 +91,7 @@ std::string strip_dates(const std::string& s) {
     out = std::regex_replace(out, dash_re(), "$1 ");
     out = std::regex_replace(out, iso_re(), "$1 ");
     out = std::regex_replace(out, month_re(), "$1 ");
+    out = std::regex_replace(out, month_en_re(), "$1 ");
     out = std::regex_replace(out, time_re(), " ");
     out = std::regex_replace(out, leading_ddmm_re(), " ");
     return out;
@@ -201,6 +214,16 @@ std::vector<Date> dates_in_line(const std::string& line, const std::vector<std::
             if (valid_md(d.m, d.d)) out.push_back(d);
         }
     }
+    if (allowed(formats, "D MON")) {
+        for (auto it = std::sregex_iterator(s.begin(), s.end(), month_en_re()); it != std::sregex_iterator(); ++it) {
+            int month = 0;
+            for (int i = 0; i < 12; ++i) {
+                if (lower((*it)[3].str()) == kMonthsEn[i]) month = i + 1;
+            }
+            Date d{(*it)[5].matched ? std::stoi((*it)[5]) : 0, month, std::stoi((*it)[2])};
+            if (valid_md(d.m, d.d)) out.push_back(d);
+        }
+    }
     return out;
 }
 
@@ -275,6 +298,7 @@ bool is_date_header(const std::string& line) {
     std::string rest = std::regex_replace(s, full_re(), "$1 ");
     rest = std::regex_replace(rest, iso_re(), "$1 ");
     rest = std::regex_replace(rest, month_re(), "$1 ");
+    rest = std::regex_replace(rest, month_en_re(), "$1 ");
     rest = std::regex_replace(rest, ddmm_re(), "$1 ");
     // Остаток — только дни недели, «г.», пунктуация.
     std::string word;

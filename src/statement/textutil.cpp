@@ -63,6 +63,23 @@ std::string normalize_spaces(const std::string& s) {
     return out;
 }
 
+std::string squeeze_spaces(const std::string& s) {
+    std::string in = normalize_spaces(s);
+    std::string out;
+    out.reserve(in.size());
+    std::size_t run = 0;
+    for (char c : in) {
+        if (c == ' ') {
+            if (++run <= 2) out.push_back(' ');
+        } else {
+            run = 0;
+            out.push_back(c);
+        }
+    }
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
+}
+
 std::string trim(const std::string& s) {
     auto first = s.find_first_not_of(" \t\r\n");
     if (first == std::string::npos) return {};

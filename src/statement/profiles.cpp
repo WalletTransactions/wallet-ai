@@ -43,7 +43,7 @@ std::string render_example(const Example& e, int first_line) {
     nlohmann::json lines = nlohmann::json::array();
     for (std::size_t i = 0; i < src.size(); ++i) {
         int n = first_line + static_cast<int>(i);
-        out += std::to_string(n) + "| " + normalize_spaces(src[i]) + "\n";
+        out += std::to_string(n) + "| " + squeeze_spaces(src[i]) + "\n";
         lines.push_back(n);
     }
     row["lines"] = lines;

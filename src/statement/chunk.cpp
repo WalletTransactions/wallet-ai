@@ -9,8 +9,9 @@ namespace stmt {
 
 namespace {
 
+// Цена строки — длина того, что уйдёт в LLM (squeeze_spaces, как в numbered_text).
 std::size_t cost_of(const std::string& line) {
-    std::string t = trim(line);
+    std::string t = squeeze_spaces(trim(line));
     return !t.empty() && has_digit(t) ? utf8_length(t) : 0;
 }
 
@@ -66,7 +67,7 @@ std::vector<ChunkPlan> plan_chunks(const std::vector<std::string>& lines, std::s
 std::string numbered_text(const std::vector<std::string>& lines, int first, int last) {
     std::string out;
     for (int n = first; n <= last && n <= static_cast<int>(lines.size()); ++n) {
-        out += std::to_string(n) + "| " + normalize_spaces(lines[n - 1]) + "\n";
+        out += std::to_string(n) + "| " + squeeze_spaces(lines[n - 1]) + "\n";
     }
     return out;
 }
