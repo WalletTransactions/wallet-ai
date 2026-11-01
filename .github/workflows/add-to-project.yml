@@ -1,0 +1,20 @@
+# Новые задачи репы — в общий проект организации.
+# Один и тот же файл во всех репах WalletTransactions; на Free встроенный
+# auto-add проекта следит только за одной репой.
+# Секрет ADD_TO_PROJECT_PAT — fine-grained PAT: Organization → Projects: read/write,
+# Repository → Issues + Pull requests: read. Секрет на каждой репе: на Free
+# секреты организации приватным репам недоступны.
+name: Add to project
+
+on:
+  issues:
+    types: [opened, reopened, transferred]
+
+jobs:
+  add:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/add-to-project@v1.0.2
+        with:
+          project-url: https://github.com/orgs/WalletTransactions/projects/1
+          github-token: ${{ secrets.ADD_TO_PROJECT_PAT }}
