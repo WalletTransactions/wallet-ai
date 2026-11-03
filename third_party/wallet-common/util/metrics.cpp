@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <ctime>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -61,7 +62,9 @@ std::map<RouteKey, HistogramState> g_duration;
 // ниже).
 std::string g_service;
 std::string g_build_version;
+std::string g_build;
 std::string g_git_commit;
+std::time_t g_started_at = 0;  // 0 — set_build_info() ещё не вызывался
 
 struct CounterFamily {
     std::string help;
@@ -127,11 +130,27 @@ void observe_duration(const std::string& name, const std::string& help, const st
 }
 
 void set_build_info(const std::string& service, const std::string& version,
-                     const std::string& git_commit) {
+                     const std::string& build, const std::string& git_commit) {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_service = service;
     g_build_version = version;
+    g_build = build;
     g_git_commit = git_commit;
+    g_started_at = std::time(nullptr);
+}
+
+std::string started_at_iso() {
+    std::time_t t;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        t = g_started_at;
+    }
+    if (t == 0) return {};
+    std::tm tm{};
+    gmtime_r(&t, &tm);
+    char buf[32];
+    std::strftime(buf, sizeof buf, "%Y-%m-%dT%H:%M:%SZ", &tm);
+    return buf;
 }
 
 void inc_counter(const std::string& name, const std::string& help, const std::string& label,
@@ -189,8 +208,13 @@ std::string render() {
         out << "# HELP build_info Информация о собранной версии сервиса (см. GET /version).\n";
         out << "# TYPE build_info gauge\n";
         out << "build_info{service=\"" << escape_label(g_service) << "\",version=\""
-            << escape_label(g_build_version) << "\",git_commit=\"" << escape_label(g_git_commit)
-            << "\"} 1\n";
+            << escape_label(g_build_version) << "\",build=\"" << escape_label(g_build)
+            << "\",git_commit=\"" << escape_label(g_git_commit) << "\"} 1\n";
+        // Имя и смысл — как у стандартной метрики Prometheus-клиентов:
+        // `time() - process_start_time_seconds` — аптайм.
+        out << "# HELP process_start_time_seconds Время запуска процесса, секунды Unix-эпохи (см. started_at в GET /version).\n";
+        out << "# TYPE process_start_time_seconds gauge\n";
+        out << "process_start_time_seconds " << static_cast<long long>(g_started_at) << "\n";
     }
 
     out << "# HELP http_requests_total Total number of HTTP requests processed.\n";

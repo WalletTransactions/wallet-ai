@@ -99,7 +99,9 @@ void handle_version(const httplib::Request&, httplib::Response& res) {
     nlohmann::json j;
     j["service"] = version::kService;
     j["version"] = version::kVersion;
+    j["build"] = version::kBuild;
     j["git_commit"] = version::kGitCommit;
+    j["started_at"] = metrics::started_at_iso();
     res.set_content(j.dump(), "application/json; charset=utf-8");
 }
 

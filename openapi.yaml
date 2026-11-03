@@ -555,6 +555,8 @@ paths:
                   service: {type: string, example: wallet-ai}
                   version: {type: string, example: "0.1.0"}
                   git_commit: {type: string, example: "a1b2c3d4"}
+                  build: {type: string, example: "0.1.1-rc.2", description: "Тег образа (--build-arg APP_BUILD); сборка без него — <VERSION>-dev"}
+                  started_at: {type: string, format: date-time, example: "2026-11-03T19:24:28Z", description: "Время запуска процесса, UTC"}
 
 components:
   securitySchemes:

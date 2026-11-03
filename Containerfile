@@ -28,8 +28,11 @@ FROM deps AS build
 # GIT_COMMIT — снаружи (`--build-arg`, см. compose.yaml): у сборки в
 # контейнере нет .git.
 ARG GIT_COMMIT=unknown
+# APP_BUILD — тег образа (`0.1.1-rc.2`), его передаёт release.yml; пусто —
+# CMake подставит `<VERSION>-dev` (GET /version, поле build).
+ARG APP_BUILD=
 ARG BUILD_JOBS=3
-RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DWALLET_AI_BUILD_TESTS=OFF -DGIT_COMMIT="${GIT_COMMIT}" \
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DWALLET_AI_BUILD_TESTS=OFF -DGIT_COMMIT="${GIT_COMMIT}" -DAPP_BUILD="${APP_BUILD}" \
     && cmake --build build --config Release -j"${BUILD_JOBS}"
 
 FROM deps AS test
