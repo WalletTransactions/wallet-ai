@@ -5,5 +5,6 @@
 namespace version {
 constexpr const char* kService = "wallet-ai";
 constexpr const char* kVersion = "@APP_VERSION@";
+constexpr const char* kBuild = "@APP_BUILD@";  // тег образа или <VERSION>-dev
 constexpr const char* kGitCommit = "@GIT_COMMIT@";
 }  // namespace version

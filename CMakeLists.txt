@@ -22,6 +22,15 @@ file(STRINGS ${CMAKE_SOURCE_DIR}/VERSION APP_VERSION_LINES LIMIT_COUNT 1)
 list(GET APP_VERSION_LINES 0 APP_VERSION)
 string(STRIP "${APP_VERSION}" APP_VERSION)
 
+# Сборка — тег образа (`0.1.1-rc.2`), отдельно от VERSION: по VERSION сверяет
+# выкат smoke в wallet-infra deploy.sh. Release передаёт тег через
+# --build-arg APP_BUILD (Containerfile → -DAPP_BUILD); сборка без него
+# помечается `-dev`, чтобы её не спутать с релизной (GET /version, поле
+# build; wallet-gateway openspec/changes/service-versions, design D1/D2).
+if(NOT DEFINED APP_BUILD OR "${APP_BUILD}" STREQUAL "")
+    set(APP_BUILD "${APP_VERSION}-dev")
+endif()
+
 if(NOT DEFINED GIT_COMMIT OR "${GIT_COMMIT}" STREQUAL "")
     find_program(GIT_EXECUTABLE git)
     set(GIT_COMMIT "unknown")
@@ -39,7 +48,7 @@ if(NOT DEFINED GIT_COMMIT OR "${GIT_COMMIT}" STREQUAL "")
         endif()
     endif()
 endif()
-message(STATUS "wallet_ai version: ${APP_VERSION} (${GIT_COMMIT})")
+message(STATUS "wallet_ai version: ${APP_VERSION}, build ${APP_BUILD} (${GIT_COMMIT})")
 
 configure_file(
     ${CMAKE_SOURCE_DIR}/src/version.hpp.in

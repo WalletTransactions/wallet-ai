@@ -35,8 +35,19 @@ void observe_http_request(const std::string& method, const std::string& route, i
 // функция, не аргумент конструктора модуля — сам модуль ничего не строит,
 // как и observe_http_request()/render() выше, только копит состояние в
 // анонимном namespace .cpp.
+//
+// build — тег образа (`0.1.1-rc.2`, CMake APP_BUILD; локальная сборка —
+// `<VERSION>-dev`), version — номер из VERSION: по version сверяет выкат
+// smoke в wallet-infra deploy.sh, поэтому тег идёт отдельным полем.
+// Момент вызова запоминается как время запуска процесса (started_at в
+// GET /version, process_start_time_seconds в /metrics): вызов стоит в main()
+// до listen(), отставание от реального старта — миллисекунды.
 void set_build_info(const std::string& service, const std::string& version,
-                     const std::string& git_commit);
+                     const std::string& build, const std::string& git_commit);
+
+// Время вызова set_build_info() в ISO-8601 UTC (`2026-11-03T19:24:28Z`);
+// пустая строка, если set_build_info() не вызывался.
+std::string started_at_iso();
 
 // Счётчик с одним лейблом — события, для которых observe_http_request не
 // подходит: метрики бота (tg_updates_total{type}), проверка claims токена

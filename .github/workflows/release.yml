@@ -103,6 +103,7 @@ jobs:
           tags: ${{ needs.meta.outputs.image }}:${{ needs.meta.outputs.version }}-rc.${{ needs.meta.outputs.rc }}
           build-args: |
             GIT_COMMIT=${{ steps.commit.outputs.short }}
+            APP_BUILD=${{ needs.meta.outputs.version }}-rc.${{ needs.meta.outputs.rc }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}

@@ -184,7 +184,8 @@ int main() {
     std::string log_dir = env_or("LOG_DIR", "");
     if (log_dir == "stdout" || log_dir == "-") log_dir.clear();
     applog::init(log_dir, "wallet-ai");
-    metrics::set_build_info(version::kService, version::kVersion, version::kGitCommit);
+    metrics::set_build_info(version::kService, version::kVersion, version::kBuild,
+                            version::kGitCommit);
 
     AppState state;
 
@@ -299,7 +300,7 @@ int main() {
         applog::clear_request_context();
     });
 
-    applog::info("wallet-ai v" + std::string(version::kVersion) + " (" + std::string(version::kGitCommit) +
+    applog::info("wallet-ai v" + std::string(version::kBuild) + " (" + std::string(version::kGitCommit) +
                  ") listening on http://" + host + ":" + std::to_string(port) + " (auth-сервис: " + auth_service_url +
                  ", LLM: " + (state.llm.url.empty() ? "выключена" : state.llm.url + " / " + state.llm.model) +
                  ", промпт: " + state.expense_prompt.version + ")");
