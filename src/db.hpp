@@ -7,6 +7,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <cstddef>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -240,5 +241,26 @@ private:
 
     friend class Lease;
 };
+
+// Не писать строку `db query` (debug) для запросов этого потока, вернувших
+// 0 строк, пока жив объект. Для фонового опроса, который почти всегда пуст:
+// import_runner раз в 5 с спрашивает активные импорты, и без этого каждая
+// пустая проверка давала строку журнала — ~17 тыс. в сутки на контур
+// (2026-11-04). Опрос, нашедший работу, и ошибки (`db_query_failed`)
+// пишутся как раньше. Вложенные объекты допустимы.
+class QuietEmptyResults {
+public:
+    QuietEmptyResults();
+    ~QuietEmptyResults();
+    QuietEmptyResults(const QuietEmptyResults&) = delete;
+    QuietEmptyResults& operator=(const QuietEmptyResults&) = delete;
+
+private:
+    bool prev_;
+};
+
+// Писать ли строку `db query` для результата из rows строк (учитывает
+// QuietEmptyResults текущего потока).
+bool should_log_query(std::size_t rows);
 
 } // namespace db
