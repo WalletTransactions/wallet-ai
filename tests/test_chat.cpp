@@ -186,7 +186,7 @@ TEST(chat_prompt_substitutions_and_real_file) {
 
     // Настоящий prompts/chat.txt: версия есть, подстановки на месте.
     llm::Prompt real = llm::load_prompt(std::string(WALLET_AI_SOURCE_DIR) + "/prompts/chat.txt");
-    CHECK_EQ(real.version, std::string("chat-v1"));
+    CHECK_EQ(real.version, std::string("chat-v2"));
     std::string rendered = chat::render_system_prompt(real, "2026-11-04", "14:05:00", "ИНСТРУКЦИИ MCP");
     CHECK(rendered.find("ИНСТРУКЦИИ MCP") != std::string::npos);
     CHECK(rendered.find("2026-11-04, среда") != std::string::npos);
