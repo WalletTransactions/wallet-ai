@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: wallet-ai
-  version: "0.1.0"
+  version: "0.2.0"
   description: |
     Единая точка доступа к LLM (`org/docs/TODO_wallet_ai.md`): разбор трат
     текстом, импорт выписок, чат с инструментами. **Ничего не пишет в
