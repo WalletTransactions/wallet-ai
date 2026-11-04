@@ -51,6 +51,7 @@ configure_file(
 add_library(wallet_ai_core STATIC
     src/access.cpp
     src/ai.cpp
+    src/auth_exchange.cpp
     src/db.cpp
     src/expense_check.cpp
     src/import_runner.cpp
@@ -59,6 +60,7 @@ add_library(wallet_ai_core STATIC
     src/jobs.cpp
     src/llm_client.cpp
     src/llm_probe.cpp
+    src/mcp_client.cpp
     src/parse_expense.cpp
     src/session.cpp
     src/statement/chunk.cpp
@@ -128,7 +130,8 @@ add_custom_command(TARGET wallet_ai POST_BUILD
     COMMENT "Копирую вендоренный Swagger UI рядом с wallet_ai (GET /docs)"
 )
 
-# Юнит-тесты — без сети: чистые функции и проба с пустым LLM_URL. В образе
+# Юнит-тесты — без внешней сети: чистые функции, проба с пустым LLM_URL,
+# клиенты auth_exchange и mcp — против фейковых серверов на 127.0.0.1. В образе
 # запускаются стадией `test` Containerfile:
 #   docker build --target test -f wallet-ai/Containerfile wallet-ai
 option(WALLET_AI_BUILD_TESTS "Собирать юнит-тесты wallet_ai_tests" ON)
