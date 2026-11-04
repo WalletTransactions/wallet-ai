@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 
+#include "db.hpp"
 #include "expense/resolver.hpp"
 #include "imports.hpp"
 #include "statement/chunk.hpp"
@@ -84,6 +85,9 @@ Runner::Runner(stmt::Repo& repo, jobs::Store& store, llm::Client& llm, Service& 
 void Runner::tick() {
     std::vector<stmt::ImportRec> active;
     try {
+        // Опрос раз в 5 с почти всегда пуст — пустой результат в журнал не
+        // пишем (db::QuietEmptyResults).
+        db::QuietEmptyResults quiet;
         active = repo_.active_imports();
     } catch (const std::exception& e) {
         applog::warn("import runner: db unavailable", {{"event", "import_runner_db"}, {"error", e.what()}});

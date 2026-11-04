@@ -175,7 +175,7 @@ Result Database::exec_locked(const std::string& sql, const std::vector<std::stri
     // (seed_loadtest.cpp, тот же db.cpp) печатал её на каждый INSERT прямо в
     // консоль Jenkins — 7 ГБ лога за один билд. Отключается LOG_LEVEL=info
     // (см. log.hpp); db_query_failed выше — по-прежнему error.
-    applog::debug("db query", details);
+    if (should_log_query(out.rows.size())) applog::debug("db query", details);
 
     return out;
 }
@@ -250,5 +250,14 @@ void Pool::release(Database* conn) {
     // проверили условие, все кроме одного заснули бы обратно).
     cv_.notify_one();
 }
+
+namespace {
+thread_local bool t_quiet_empty = false;
+} // namespace
+
+QuietEmptyResults::QuietEmptyResults() : prev_(t_quiet_empty) { t_quiet_empty = true; }
+QuietEmptyResults::~QuietEmptyResults() { t_quiet_empty = prev_; }
+
+bool should_log_query(std::size_t rows) { return rows != 0 || !t_quiet_empty; }
 
 } // namespace db

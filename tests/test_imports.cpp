@@ -3,6 +3,7 @@
 #include <regex>
 
 #include "ai.hpp"
+#include "db.hpp"
 #include "imports.hpp"
 #include "mem_repo.hpp"
 #include "statement/textutil.hpp"
@@ -724,4 +725,22 @@ TEST(import_pdf_scan_fails_fast) {
     CHECK_EQ(r.status, 202);
     CHECK_EQ(r.body["status"], "failed");
     CHECK_EQ(r.body["failure"], "no_text");
+}
+
+// Пустой фоновый опрос не пишет `db query`; найденная работа и запросы вне
+// QuietEmptyResults — пишут (журнал, 2026-11-04).
+TEST(db_quiet_empty_results_only_inside_scope) {
+    CHECK(db::should_log_query(0));
+    CHECK(db::should_log_query(3));
+    {
+        db::QuietEmptyResults quiet;
+        CHECK(!db::should_log_query(0));
+        CHECK(db::should_log_query(1));
+        {
+            db::QuietEmptyResults nested;
+            CHECK(!db::should_log_query(0));
+        }
+        CHECK(!db::should_log_query(0));
+    }
+    CHECK(db::should_log_query(0));
 }
