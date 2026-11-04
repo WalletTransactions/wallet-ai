@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: wallet-ai
-  version: "0.1.0"
+  version: "0.2.0"
   description: |
     Единая точка доступа к LLM (`org/docs/TODO_wallet_ai.md`): разбор трат
     текстом, импорт выписок, чат с инструментами. **Ничего не пишет в
@@ -62,8 +62,11 @@ paths:
                     type: array
                     description: |
                       Что сейчас можно: `parse_expense` — при включённом ИИ,
-                      `statement_import` — ещё и база ai отвечает.
-                    items: {type: string, enum: [parse_expense, statement_import]}
+                      `statement_import` — ещё и база ai отвечает, `chat` —
+                      ещё и заданы `WALLET_MCP_URL` и `AUTH_EXCHANGE_SECRET`.
+                      Чат через Claude работает и при выключенной LM Studio —
+                      см. `GET /api/ai/settings`.
+                    items: {type: string, enum: [parse_expense, statement_import, chat]}
         "401":
           description: Нет токена, подпись не сошлась, токен просрочен, выпущен не для wallet-ai или старого формата
           content:
@@ -85,9 +88,20 @@ paths:
         (`GET /api/ai/jobs/{id}?wait=25`). Справочник счетов берётся токеном
         пользователя в момент создания.
 
-        Виды (`kind`): пока только `parse_expense` — трата свободным текстом
-        в проверенный черновик. Запись черновика — дело клиента
-        (`POST /sync/push` в wallet-api) после подтверждения пользователем.
+        Виды (`kind`):
+        - `parse_expense` — трата свободным текстом в проверенный черновик
+          (`ParseExpenseInput` → `ParseExpenseResult`). Запись черновика —
+          дело клиента (`POST /sync/push` в wallet-api) после подтверждения
+          пользователем. Всегда LM Studio: при выключенной — `503 unavailable`.
+        - `chat` — вопрос о кошельке обычными словами (`ChatInput` →
+          `ChatResult`). Ответ собирает агентный цикл: модель просит
+          инструменты wallet-mcp (только чтение), сервис их исполняет и
+          возвращает результаты модели — не больше `AI_CHAT_MAX_STEPS` (5)
+          вызовов модели и `AI_JOB_TIMEOUT_SECS_CHAT` (120 с). Провайдер —
+          выбранный пользователем на момент создания (`GET /api/ai/settings`),
+          без молчаливой подмены. При создании токен пользователя
+          обменивается в google-auth на токен для wallet-mcp; он живёт только
+          во входе задания в памяти и в ответы не попадает.
 
         `idempotency_key` — повтор с тем же ключом от того же пользователя
         возвращает то же задание без нового запуска LLM (бот:
@@ -101,21 +115,12 @@ paths:
               type: object
               required: [kind, input]
               properties:
-                kind: {type: string, enum: [parse_expense]}
+                kind: {type: string, enum: [parse_expense, chat]}
                 idempotency_key: {type: string}
                 input:
-                  type: object
-                  required: [text, now]
-                  properties:
-                    text: {type: string, maxLength: 500, example: "вчера такси 450 с тинькоффа"}
-                    now:
-                      type: object
-                      description: Сейчас в поясе пользователя — от него считаются «вчера», «в пятницу»
-                      required: [date, time]
-                      properties:
-                        date: {type: string, example: "2026-10-11"}
-                        time: {type: string, example: "14:05:00"}
-                    default_wallet_uuid: {type: string, description: Кошелёк по умолчанию, если кошелёк не назван}
+                  oneOf:
+                    - $ref: "#/components/schemas/ParseExpenseInput"
+                    - $ref: "#/components/schemas/ChatInput"
       responses:
         "202":
           description: Задание создано (или найдено по idempotency_key)
@@ -130,7 +135,7 @@ paths:
           description: "Неизвестный kind или неверный input; `unknown_kind` — extract_rows/classify_rows создаёт только сам сервис"
           content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
         "401":
-          description: Нет токена / не для wallet-ai / wallet-report не принял токен
+          description: "Нет токена / не для wallet-ai / wallet-report не принял токен; `invalid_token` — google-auth отказал в обмене токена для wallet-mcp (chat)"
           content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
         "403":
           description: Нет scope `ai:use`
@@ -142,7 +147,85 @@ paths:
           description: wallet-report недоступен
           content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
         "503":
-          description: "`unavailable` — ИИ выключен или LLM не отвечает; клиент уходит на строгий формат"
+          description: |
+            - `unavailable` — `parse_expense`: ИИ выключен или LLM не отвечает,
+              клиент уходит на строгий формат; `chat`: не заданы
+              `WALLET_MCP_URL`/`AUTH_EXCHANGE_SECRET` или google-auth недоступен;
+            - `provider_unavailable` (`chat`) — выбранный провайдер сейчас
+              недоступен, в `provider` — его id. Задание не создаётся.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: {type: string, enum: [unavailable, provider_unavailable]}
+                  provider: {type: string, enum: [lmstudio, claude], description: При provider_unavailable}
+
+  /api/ai/settings:
+    get:
+      operationId: getAiSettings
+      summary: Настройки ИИ — провайдер чата и согласия
+      description: |
+        Выбранный провайдер и список провайдеров с доступностью для этого
+        пользователя. Без сохранённого выбора (или без базы ai) —
+        `AI_DEFAULT_PROVIDER` (`lmstudio`). Ключей провайдеров в ответе нет.
+      tags: [ai]
+      responses:
+        "200":
+          description: Настройки
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AiSettings"}
+        "401":
+          description: Нет токена или он не для wallet-ai
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "403":
+          description: Нет scope `ai:use`
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+    put:
+      operationId: putAiSettings
+      summary: Выбрать провайдера чата, дать или отозвать согласие
+      description: |
+        Облачный провайдер (`claude`) выбирается только с согласием на
+        передачу данных: результаты инструментов (суммы, категории,
+        комментарии операций) уходят в Anthropic. Согласие передаётся
+        `consent: true` один раз и хранится в базе ai. `consent: false` —
+        отзыв: согласие стирается, а если провайдер был выбран, выбор
+        переходит на `AI_DEFAULT_PROVIDER`.
+      tags: [ai]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider]
+              properties:
+                provider: {type: string, enum: [lmstudio, claude]}
+                consent: {type: boolean, description: "true — согласие на передачу данных облачному провайдеру, false — отзыв"}
+            examples:
+              claude: {value: {provider: claude, consent: true}}
+              revoke: {value: {provider: claude, consent: false}}
+      responses:
+        "200":
+          description: Новые настройки
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AiSettings"}
+        "400":
+          description: "`provider_unavailable` — неизвестный или недоступный этому пользователю провайдер; `bad_request` — тело не объект или `consent` не boolean"
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "401":
+          description: Нет токена или он не для wallet-ai
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "403":
+          description: Нет scope `ai:use`
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "409":
+          description: "`consent_required` — облачный провайдер без сохранённого или переданного `consent: true`; выбор не меняется"
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "503":
+          description: "`settings_unavailable` — нет `DATABASE_URL` или база ai не отвечает"
           content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
 
   /api/ai/jobs/{id}:
@@ -581,17 +664,107 @@ components:
       required: [job_id, kind, status]
       properties:
         job_id: {type: string, format: uuid}
-        kind: {type: string, example: parse_expense}
+        kind: {type: string, enum: [parse_expense, chat], example: parse_expense}
         status: {type: string, enum: [queued, running, done, failed, cancelled]}
         queue_ms: {type: integer, description: Сколько ждало в очереди}
         run_ms: {type: integer, description: Сколько выполнялось}
         failure:
           type: string
-          description: При failed
-          enum: [timeout, unavailable, bad_response, internal]
+          description: |
+            При failed. Для `chat` ещё: `tools_unavailable` — wallet-mcp
+            недоступен или ответил 503; `auth_expired` — wallet-mcp ответил
+            401 (токен обмена истёк); `provider_auth_failed` — провайдер
+            отклонил ключ; `provider_refused` — модель отказалась отвечать;
+            `unavailable` — провайдер недоступен (сеть, 429, 5xx).
+          enum: [timeout, unavailable, bad_response, internal, tools_unavailable, auth_expired, provider_auth_failed, provider_refused]
         result:
-          description: При done; для parse_expense — ParseExpenseResult
-          $ref: "#/components/schemas/ParseExpenseResult"
+          description: При done; для parse_expense — ParseExpenseResult, для chat — ChatResult
+          oneOf:
+            - $ref: "#/components/schemas/ParseExpenseResult"
+            - $ref: "#/components/schemas/ChatResult"
+
+    ParseExpenseInput:
+      type: object
+      required: [text, now]
+      properties:
+        text: {type: string, maxLength: 500, example: "вчера такси 450 с тинькоффа"}
+        now:
+          type: object
+          description: Сейчас в поясе пользователя — от него считаются «вчера», «в пятницу»
+          required: [date, time]
+          properties:
+            date: {type: string, example: "2026-10-11"}
+            time: {type: string, example: "14:05:00"}
+        default_wallet_uuid: {type: string, description: Кошелёк по умолчанию, если кошелёк не назван}
+
+    ChatInput:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+          minLength: 1
+          description: Вопрос пользователя, 1..1000 байт UTF-8. В журнал не пишется.
+          example: сколько я потратил на няню в сентябре?
+        conversation_id:
+          type: string
+          pattern: "^[A-Za-z0-9_:-]{1,64}$"
+          description: |
+            Диалог: следующее задание с тем же id получает прежние пары
+            «вопрос — ответ» (не больше `AI_CHAT_HISTORY_TURNS`, 30 минут от
+            последнего обращения). История — у каждого пользователя своя.
+            Нет — сервис создаёт новый и возвращает его в результате.
+          example: tg-42-1
+        now:
+          type: object
+          description: Сейчас в поясе пользователя — для «в этом месяце», «вчера». Нет — UTC сервера.
+          required: [date, time]
+          properties:
+            date: {type: string, example: "2026-11-04"}
+            time: {type: string, example: "14:05:00"}
+
+    ChatResult:
+      type: object
+      required: [text, conversation_id, provider, steps, tools]
+      properties:
+        text: {type: string, description: Ответ модели обычным текстом, example: "За сентябрь 2026 на няню ушло 42 000 RUB."}
+        conversation_id: {type: string, description: Из входа или новый, example: tg-42-1}
+        provider: {type: string, enum: [lmstudio, claude]}
+        steps: {type: integer, description: Число вызовов модели, example: 2}
+        tools:
+          type: array
+          description: Имена вызванных инструментов wallet-mcp по порядку
+          items: {type: string}
+          example: [spending_by_category]
+
+    AiSettings:
+      type: object
+      required: [provider, providers]
+      properties:
+        provider:
+          type: string
+          enum: [lmstudio, claude]
+          description: Провайдер, которым пойдут новые задания chat
+        providers:
+          type: array
+          items:
+            type: object
+            required: [id, title, cloud, available, requires_consent, consented, consented_at]
+            properties:
+              id: {type: string, enum: [lmstudio, claude]}
+              title: {type: string, example: "Claude (Anthropic)"}
+              cloud: {type: boolean, description: Данные уходят во внешнее облако}
+              available: {type: boolean}
+              reason:
+                type: string
+                description: |
+                  Есть, только если недоступен: `not_configured` — не задан
+                  `LLM_URL`/`ANTHROPIC_API_KEY`; `not_allowed` — пользователя
+                  нет в `ANTHROPIC_ALLOWED_USERS`; для `lmstudio` — результат
+                  пробы LLM (`unreachable`, `model_not_loaded`, ...).
+              requires_consent: {type: boolean}
+              consented: {type: boolean}
+              consented_at: {type: [string, "null"], format: date-time, description: Когда дано согласие}
 
     ParseExpenseResult:
       type: object

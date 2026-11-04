@@ -7,7 +7,8 @@
 // подтверждения. Токены не выпускает — только проверяет по JWKS google-auth.
 //
 // Каркас, проверка токена (aud wallet-ai, scope ai:use), GET /api/ai/status,
-// фоновая проба LLM; задания (/api/ai/jobs) и их воркеры — шаг 3.
+// фоновая проба LLM; задания (/api/ai/jobs) и их воркеры — шаг 3; чат с
+// инструментами wallet-mcp и провайдеры — openspec/changes/add-chat-agent.
 
 #include <algorithm>
 #include <chrono>
@@ -152,6 +153,7 @@ void setup_imports(AppState& state, const std::string& prompt_dir, const std::st
             }
         }
         state.repo = stmt::make_pg_repo(*state.db);
+        state.settings_repo = providers::make_pg_settings_repo(*state.db);
         state.import_service = std::make_unique<imports::Service>(
             *state.repo, *state.reports, std::move(profiles), cfg,
             [] { return static_cast<stmt::Epoch>(std::time(nullptr)); });
@@ -174,6 +176,87 @@ void setup_imports(AppState& state, const std::string& prompt_dir, const std::st
             }
         }
     }).detach();
+}
+
+// Чат (openspec/changes/add-chat-agent): провайдеры, wallet-mcp, обмен
+// токена, история, промпт. Без WALLET_MCP_URL или AUTH_EXCHANGE_SECRET вид
+// chat выключен (503 unavailable), остальное работает как раньше. Без
+// prompts/chat.txt сервис не стартует — как без expense.txt.
+bool setup_chat(AppState& state, const std::string& prompt_dir, const std::string& auth_service_url) {
+    llm::Prompt chat_prompt;
+    try {
+        chat_prompt = llm::load_prompt(prompt_dir + "/chat.txt");
+    } catch (const std::exception& e) {
+        applog::error(e.what());
+        return false;
+    }
+
+    std::string anthropic_key = env_or("ANTHROPIC_API_KEY", "");
+    providers::Config pcfg;
+    pcfg.default_provider = env_or("AI_DEFAULT_PROVIDER", providers::kLmStudio);
+    pcfg.llm_configured = !state.llm.url.empty();
+    pcfg.claude_configured = !anthropic_key.empty();
+    pcfg.claude_allowed = providers::parse_allowed_users(env_or("ANTHROPIC_ALLOWED_USERS", ""));
+    state.providers = std::make_unique<providers::Registry>(pcfg);
+    if (state.providers->default_provider() != pcfg.default_provider) {
+        applog::error("AI_DEFAULT_PROVIDER должен быть локальным провайдером (lmstudio), получено: " +
+                      pcfg.default_provider + " — беру lmstudio");
+    }
+    state.credentials = std::make_unique<providers::CredentialResolver>(state.llm.api_key, anthropic_key);
+
+    chat::OpenAiConfig ocfg;
+    ocfg.url = state.llm.url;
+    ocfg.model = state.llm.model;
+    ocfg.max_tokens = env_int("LLM_MAX_TOKENS_CHAT", 1024);
+    ocfg.reasoning_effort = env_or("LLM_REASONING_CHAT", "none");
+    if (ocfg.reasoning_effort == "default") ocfg.reasoning_effort.clear();
+    state.providers->set_model(providers::kLmStudio, chat::make_openai_model(ocfg));
+
+    chat::AnthropicConfig acfg;
+    acfg.model = env_or("ANTHROPIC_MODEL", acfg.model);
+    acfg.max_tokens = env_int("ANTHROPIC_MAX_TOKENS", acfg.max_tokens);
+    acfg.effort = env_or("ANTHROPIC_EFFORT", acfg.effort);
+    acfg.fallbacks = env_or("ANTHROPIC_FALLBACKS", "default") != "off";
+    state.providers->set_model(providers::kClaude, chat::make_anthropic_model(acfg));
+
+    std::string mcp_url = env_or("WALLET_MCP_URL", "");
+    std::string exchange_secret = env_or("AUTH_EXCHANGE_SECRET", "");
+    if (!mcp_url.empty() && mcp::split_url(mcp_url).origin.empty()) {
+        applog::error("WALLET_MCP_URL должен быть вида http://wallet-mcp:8088/api/mcp/, получено: " + mcp_url);
+        return false;
+    }
+    state.chat_enabled = !mcp_url.empty() && !exchange_secret.empty();
+    state.mcp = mcp::make_http_client({mcp_url});
+    state.auth_exchange = auth_exchange::make_http_client({auth_service_url, exchange_secret});
+
+    state.conversations = std::make_unique<chat::Conversations>(
+        static_cast<std::size_t>(std::max(0, env_int("AI_CHAT_HISTORY_TURNS", 6))),
+        std::chrono::seconds(env_int("AI_CHAT_HISTORY_TTL_SECS", 1800)));
+
+    state.chat_agent = std::make_unique<chat::Agent>();
+    state.chat_agent->mcp = state.mcp.get();
+    state.chat_agent->registry = state.providers.get();
+    state.chat_agent->credentials = state.credentials.get();
+    state.chat_agent->conversations = state.conversations.get();
+    state.chat_agent->prompt = chat_prompt;
+    state.chat_agent->cfg.max_steps = std::max(1, env_int("AI_CHAT_MAX_STEPS", 5));
+    state.chat_agent->cfg.timeout_ms = env_int("AI_JOB_TIMEOUT_SECS_CHAT", 120) * 1000;
+    state.chat_agent->cfg.tool_result_max_chars =
+        static_cast<std::size_t>(std::max(0, env_int("AI_CHAT_TOOL_RESULT_MAX_CHARS", 6000)));
+
+    // Ключи в журнал не пишем — только настроены ли они.
+    nlohmann::json details = {{"event", "chat_config"},
+                              {"enabled", state.chat_enabled},
+                              {"prompt_version", chat_prompt.version},
+                              {"claude", pcfg.claude_configured},
+                              {"claude_model", acfg.model},
+                              {"default_provider", state.providers->default_provider()}};
+    if (state.chat_enabled) {
+        applog::info("чат включён", details);
+    } else {
+        applog::warn("WALLET_MCP_URL или AUTH_EXCHANGE_SECRET не заданы — вид chat выключен", details);
+    }
+    return true;
 }
 
 } // namespace
@@ -237,16 +320,26 @@ int main() {
     limits.ttl = std::chrono::seconds(std::stoi(env_or("AI_JOB_TTL_SECS", "600")));
     state.jobs = std::make_unique<jobs::Store>(limits);
 
+    if (!setup_chat(state, prompt_dir, auth_service_url)) return 1;
     setup_imports(state, prompt_dir, env_or("DATABASE_URL", ""));
 
-    // Воркеры = одновременные запросы к GPU (§4): на одной видеокарте — 1.
+    // Воркеры локальной полосы = одновременные запросы к GPU (§4): на одной
+    // видеокарте — 1. Облачная полоса (Claude) — свои воркеры, GPU не ждёт.
     int workers = std::max(1, std::stoi(env_or("LLM_MAX_CONCURRENT", "1")));
-    for (int i = 0; i < workers; ++i) std::thread([&state] { aiapi::run_worker(state); }).detach();
-    // Завершённые задания живут AI_JOB_TTL_SECS — потом удаляются.
+    for (int i = 0; i < workers; ++i) {
+        std::thread([&state] { aiapi::run_worker(state, jobs::Lane::Local); }).detach();
+    }
+    int cloud_workers = std::max(1, env_int("AI_CLOUD_MAX_CONCURRENT", 2));
+    for (int i = 0; i < cloud_workers; ++i) {
+        std::thread([&state] { aiapi::run_worker(state, jobs::Lane::Cloud); }).detach();
+    }
+    // Завершённые задания живут AI_JOB_TTL_SECS — потом удаляются; истёкшие
+    // диалоги чата — тем же потоком.
     std::thread([&state] {
         for (;;) {
             std::this_thread::sleep_for(std::chrono::seconds(30));
             state.jobs->sweep();
+            state.conversations->sweep(std::chrono::steady_clock::now());
         }
     }).detach();
 
@@ -303,7 +396,8 @@ int main() {
     applog::info("wallet-ai v" + std::string(version::kBuild) + " (" + std::string(version::kGitCommit) +
                  ") listening on http://" + host + ":" + std::to_string(port) + " (auth-сервис: " + auth_service_url +
                  ", LLM: " + (state.llm.url.empty() ? "выключена" : state.llm.url + " / " + state.llm.model) +
-                 ", промпт: " + state.expense_prompt.version + ")");
+                 ", промпт: " + state.expense_prompt.version + ", чат: " +
+                 (state.chat_enabled ? "включён" : "выключен") + ")");
     if (!svr.listen(host, port)) {
         applog::error("не удалось запустить сервер на " + host + ":" + std::to_string(port) +
                       " (порт занят или недоступен?)");

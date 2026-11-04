@@ -8,13 +8,17 @@
 #include <memory>
 #include <string>
 
+#include "auth_exchange.hpp"
+#include "chat.hpp"
 #include "clients/reports_client.hpp"
 #include "db.hpp"
 #include "imports.hpp"
 #include "jobs.hpp"
 #include "llm_client.hpp"
 #include "llm_probe.hpp"
+#include "mcp_client.hpp"
 #include "parse_expense.hpp"
+#include "providers.hpp"
 #include "util/jwks.hpp"
 
 struct AppState {
@@ -59,4 +63,20 @@ struct AppState {
     std::unique_ptr<stmt::Repo> repo;
     std::unique_ptr<imports::Service> import_service;
     std::unique_ptr<imports::Runner> import_runner;
+
+    // --- Чат (add-chat-agent) ---
+
+    // Провайдеры (lmstudio, claude) и их адаптеры; ключ — на каждый вызов.
+    std::unique_ptr<providers::Registry> providers;
+    std::unique_ptr<providers::CredentialResolver> credentials;
+    // Настройки ИИ пользователя в базе ai; выставляется до db_up = true.
+    // nullptr или база не отвечает — провайдер по умолчанию, PUT — 503.
+    std::unique_ptr<providers::SettingsRepo> settings_repo;
+    // Заданы WALLET_MCP_URL и AUTH_EXCHANGE_SECRET; иначе chat — 503
+    // unavailable (Migration Plan п. 2).
+    bool chat_enabled = false;
+    std::unique_ptr<auth_exchange::Client> auth_exchange;
+    std::unique_ptr<mcp::Client> mcp;
+    std::unique_ptr<chat::Conversations> conversations;
+    std::unique_ptr<chat::Agent> chat_agent;
 };

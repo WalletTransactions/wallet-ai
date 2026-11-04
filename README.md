@@ -6,7 +6,8 @@
 
 ```
 браузер ─> wallet-gateway ─ /api/ai/* ─> wallet-ai ─> LLM (LM Studio на хосте, OpenAI API)
-Telegram ─> wallet-telegram ─────────────> wallet-ai
+Telegram ─> wallet-telegram ─────────────> wallet-ai ─> Claude (api.anthropic.com, по выбору пользователя)
+                                              └──────> wallet-mcp (инструменты чтения, чат)
 ```
 
 **Сервис ничего не пишет в кошелёк.** Он возвращает черновики и читает
@@ -17,8 +18,8 @@ Telegram ─> wallet-telegram ─────────────> wallet-ai
 
 Шаги 1–3 из §10 плана: каркас, проверка токена, `GET /api/ai/status`,
 фоновая проба LLM, `llm_client`, асинхронные задания и `parse_expense` —
-трата свободным текстом в проверенный черновик. Бот и веб к заданиям ещё не
-подключены (шаги 4–5).
+трата свободным текстом в проверенный черновик. Задание `chat` — вопрос о
+кошельке обычными словами (`openspec/changes/add-chat-agent`, см. «Чат»).
 
 ## API
 
@@ -26,6 +27,7 @@ Telegram ─> wallet-telegram ─────────────> wallet-ai
 | --- | --- | --- |
 | GET | `/api/ai/status` | `{enabled, model, reason, features}` — включён ли ИИ |
 | POST | `/api/ai/jobs` | `{kind, input, idempotency_key?}` → `202 {job_id}`; ИИ выключен — `503` |
+| GET / PUT | `/api/ai/settings` | провайдер чата (`lmstudio`, `claude`) и согласие на облако |
 | GET | `/api/ai/jobs/{id}?wait=N` | статус и результат; `wait` ≤ 25 с — long-poll |
 | DELETE | `/api/ai/jobs/{id}` | отменить |
 | POST | `/api/ai/imports` | выписка (текст или файл) и кошелёк → `202 {import_id}` |
@@ -51,8 +53,11 @@ curl "$GW/api/ai/jobs/$ID?wait=25" -H "Authorization: Bearer $T"
 # -> {"status":"done","result":{"outcome":"draft","expense":{…},"resolution":{…}}}
 ```
 
-- **Очередь.** `LLM_MAX_CONCURRENT` воркеров (одна видеокарта — один);
-  интерактивные задания раньше фоновых.
+- **Очередь.** Две полосы. Локальная (LM Studio: `parse_expense`, импорт,
+  чат через `lmstudio`) — `LLM_MAX_CONCURRENT` воркеров (одна видеокарта —
+  один), интерактивные задания раньше фоновых. Облачная (чат через `claude`)
+  — `AI_CLOUD_MAX_CONCURRENT` воркеров, GPU не ждёт. `AI_QUEUE_MAX` — на
+  полосу; лимиты пользователя общие.
 - **Хранение.** Задания живут в памяти: вход — до завершения, результат —
   `AI_JOB_TTL_SECS` после. Рестарт сервиса их теряет, и это допустимо.
 - **Доступ.** Задание видит только владелец, на чужой id — 404.
@@ -68,6 +73,99 @@ curl "$GW/api/ai/jobs/$ID?wait=25" -H "Authorization: Bearer $T"
   получает `failed`.
 
 Полный контракт — [`openapi.yaml`](openapi.yaml), Swagger UI — `GET /docs`.
+
+### Чат
+
+Спецификация — `openspec/changes/add-chat-agent`. Клиент — бот
+(`add-ai-chat` в wallet-telegram), позже веб.
+
+```bash
+curl -X POST $GW/api/ai/jobs -H "Authorization: Bearer $T" -d '{"kind":"chat",
+  "input":{"text":"сколько я потратил на няню в сентябре?","conversation_id":"tg-42-1",
+           "now":{"date":"2026-11-04","time":"14:05:00"}}}'   # -> 202 {"job_id":"…"}
+curl "$GW/api/ai/jobs/$ID?wait=25" -H "Authorization: Bearer $T"
+# -> {"status":"done","result":{"text":"…","conversation_id":"tg-42-1","provider":"lmstudio",
+#     "steps":2,"tools":["spending_by_category"]}}
+```
+
+- **Включение.** Вид `chat` работает только при заданных `WALLET_MCP_URL`
+  и `AUTH_EXCHANGE_SECRET`; без них создание отвечает `503 unavailable`, а
+  `parse_expense` и импорт работают как раньше.
+- **Токен для wallet-mcp.** При создании задания JWT пользователя
+  обменивается в google-auth (`/internal/token/exchange`, actor `wallet-ai`,
+  `audience=wallet-mcp`, `src/auth_exchange.cpp`). Отказ — `401
+  invalid_token`, google-auth недоступен — `503 unavailable`. Выданный токен
+  живёт только во входе задания в памяти: ни в снимок задания, ни в журнал
+  он не попадает.
+- **Цикл** (`src/chat.cpp`). На задание — `initialize` (берутся
+  `instructions`) и `tools/list` wallet-mcp (`src/mcp_client.cpp`), затем
+  модель → `tool_calls` → `tools/call` → результаты модели → … → текст. Не
+  больше `AI_CHAT_MAX_STEPS` (5) вызовов модели; если модель всё ещё просит
+  инструменты, шестой вызов идёт без них с просьбой ответить по полученным
+  данным. Всё задание — `AI_JOB_TIMEOUT_SECS_CHAT` (120 с), потом `failed:
+  timeout`. Инструмента нет в `tools/list` или аргументы не JSON — модели
+  возвращается ошибка инструмента, в wallet-mcp ничего не уходит.
+  Результат инструмента длиннее `AI_CHAT_TOOL_RESULT_MAX_CHARS` обрезается.
+- **Отказы:** `tools_unavailable` (wallet-mcp лежит или 503), `auth_expired`
+  (wallet-mcp ответил 401), `provider_auth_failed` (провайдер отклонил ключ,
+  в журнале — `provider` и `owner`), `provider_refused` (модель отказалась),
+  `unavailable` (провайдер недоступен), `timeout`, `internal`.
+- **История.** В памяти по паре (пользователь, `conversation_id`): пары
+  «вопрос — итоговый ответ», не больше `AI_CHAT_HISTORY_TURNS`, живут
+  `AI_CHAT_HISTORY_TTL_SECS` от последнего обращения. Результаты
+  инструментов не хранятся. Нет `conversation_id` — сервис создаёт UUID и
+  возвращает его. Рестарт историю теряет.
+- **Промпт** — [`prompts/chat.txt`](prompts/chat.txt) (`# version: chat-v1`),
+  подстановки `{today}`, `{weekday}`, `{time}` (из `input.now`, иначе UTC
+  сервера) и `{mcp_instructions}`. Нет файла — сервис не стартует.
+
+**Провайдеры** (`src/chat_models.cpp`, адаптеры к одной нейтральной модели
+сообщений):
+
+- `lmstudio` — OpenAI-совместимый `POST {LLM_URL}/chat/completions` с
+  `tools`; результаты — сообщения `role: tool`, `<think>` вырезается.
+  Доступен, когда задан `LLM_URL` и последняя проба LLM `ok`.
+- `claude` — Anthropic Messages API сырым HTTPS (`POST
+  https://api.anthropic.com/v1/messages`, `anthropic-version: 2026-10-21`;
+  у C++ нет официального SDK). Тело: `ANTHROPIC_MODEL`, `thinking:
+  adaptive`, `output_config.effort` = `ANTHROPIC_EFFORT`, `tool_choice: auto`
+  (в последнем вызове — `none`), без `temperature`/`top_p`. Серверный
+  fallback при отказе (`fallbacks: "default"`, beta
+  `server-side-fallback-2026-07-01`) включён, `ANTHROPIC_FALLBACKS=off`
+  выключает. Ответ ассистента уходит обратно в историю цикла целиком,
+  вместе с блоками `thinking` (append-only), все `tool_result` хода — одним
+  сообщением `user`. Доступен, когда задан `ANTHROPIC_API_KEY` и пользователь
+  в `ANTHROPIC_ALLOWED_USERS` (`user_id` через запятую или `*`).
+
+Ключ провайдера определяется на каждый вызов модели (сейчас — ключ стека,
+`owner: instance`); в задании, журнале и ответах API его нет.
+
+### Настройки ИИ
+
+`GET /api/ai/settings` — выбранный провайдер и список `providers` с
+`available`/`reason`, `requires_consent`, `consented`, `consented_at`
+(схема `AiSettings`). Без выбора — `AI_DEFAULT_PROVIDER` (`lmstudio`).
+
+`PUT /api/ai/settings {provider, consent?}`:
+
+- неизвестный или недоступный провайдер — `400 provider_unavailable`;
+- `claude` без сохранённого или переданного `consent: true` — `409
+  consent_required`, выбор не меняется;
+- `{"provider":"claude","consent":false}` — отзыв: согласие стёрто, выбор —
+  `lmstudio`;
+- без `DATABASE_URL` (или база не отвечает) — `503 settings_unavailable`.
+
+Хранится в базе ai (`migrations/000002_ai_user_settings`:
+`ai_user_settings`, `ai_provider_consent`). Задание `chat` выполняется
+провайдером, выбранным на момент создания; недоступен — `503
+{"error":"provider_unavailable","provider":"…"}`, на другого провайдера
+сервис молча не переключает.
+
+**Приватность.** При выборе Claude результаты инструментов (суммы,
+категории, комментарии операций) уходят в Anthropic — только после явного
+согласия пользователя. Журнал и метрики чата содержат только id,
+провайдера, имена инструментов, шаги, токены, длительности и исход — ни
+текста вопроса и ответа, ни аргументов и результатов инструментов.
 
 ### Импорт выписки
 
@@ -128,14 +226,15 @@ Access-токен google-auth (Bearer или cookie `session`), подпись �
 | `LLM_API_KEY` | пусто | `Authorization: Bearer` к LLM |
 | `LLM_TIMEOUT_MS` | `15000` | read-таймаут; connect — 2 с |
 | `LLM_PROBE_INTERVAL_SECS` | `60` | как часто проверять LLM |
-| `LLM_PROMPT_DIR` | `prompts` | где лежат промпты (`expense.txt`); нет файла — сервис не стартует |
+| `LLM_PROMPT_DIR` | `prompts` | где лежат промпты (`expense.txt`, `chat.txt`); нет файла — сервис не стартует |
 | `WALLET_REPORT_URL` | — | wallet-report: справочник счетов токеном пользователя |
-| `LLM_MAX_CONCURRENT` | `1` | воркеров заданий = одновременных запросов к GPU |
+| `LLM_MAX_CONCURRENT` | `1` | воркеров локальной полосы = одновременных запросов к GPU |
+| `AI_CLOUD_MAX_CONCURRENT` | `2` | воркеров облачной полосы (чат через Claude) |
 | `LLM_REASONING_PARSE_EXPENSE` | `none` | `reasoning_effort` для `parse_expense`; `default` — не передавать |
 | `LLM_MAX_TOKENS_PARSE_EXPENSE` | `512` | запас под рассуждения модели |
 | `AI_JOB_TIMEOUT_SECS_PARSE_EXPENSE` | `60` | дедлайн генерации задания |
 | `AI_JOB_TTL_SECS` | `600` | сколько хранить завершённое задание |
-| `AI_QUEUE_MAX` | `20` | интерактивных заданий в очереди; больше — `429 busy` |
+| `AI_QUEUE_MAX` | `20` | интерактивных заданий в очереди полосы; больше — `429 busy` |
 | `AI_MAX_ACTIVE_PER_USER` | `3` | незавершённых заданий на пользователя |
 | `LLM_MAX_PER_MINUTE` | `10` | новых заданий на пользователя в минуту |
 | `DATABASE_URL` | пусто | база ai — импорт выписок; пусто — импорт выключен |
@@ -148,11 +247,28 @@ Access-токен google-auth (Bearer или cookie `session`), подпись �
 | `AI_PROFILE_MAX_TOKENS` | `500` | бюджет профиля формата в промпте; фрагмент урезается, только если с профилем и ответом не влезает в `LLM_CONTEXT` |
 | `AI_JOB_TIMEOUT_SECS_EXTRACT_ROWS` / `AI_JOB_TIMEOUT_SECS_CLASSIFY_ROWS` | `180` / `60` | дедлайн вызова LLM |
 | `LLM_MAX_TOKENS_CLASSIFY_ROWS` | `1024` | у `extract_rows` — 200 + 100 на строку с суммой + символы / 6, не больше места в `LLM_CONTEXT` после промпта |
+| `WALLET_MCP_URL` | пусто | wallet-mcp напрямую, не через гейтвей (`http://wallet-mcp:8088/api/mcp/`). Пусто — вид `chat` выключен |
+| `AUTH_EXCHANGE_SECRET` | пусто | секрет actor `wallet-ai` для `/internal/token/exchange` google-auth (`TOKEN_EXCHANGE_SECRETS` там). Пусто — `chat` выключен |
+| `AI_DEFAULT_PROVIDER` | `lmstudio` | провайдер без выбора пользователя; только локальный |
+| `ANTHROPIC_API_KEY` | пусто | ключ стека для Claude. Пусто — `claude` недоступен (`not_configured`) |
+| `ANTHROPIC_ALLOWED_USERS` | пусто | кому доступен Claude: `user_id` через запятую или `*`; пусто — никому |
+| `ANTHROPIC_MODEL` | `claude-opus-5-5` | модель Claude (например, `claude-haiku-5-5` — дешевле) |
+| `ANTHROPIC_MAX_TOKENS` | `16000` | `max_tokens` вызова Claude |
+| `ANTHROPIC_EFFORT` | `low` | `output_config.effort` (`low` … `max`) |
+| `ANTHROPIC_FALLBACKS` | вкл. | `off` — без серверного fallback при отказе модели |
+| `AI_JOB_TIMEOUT_SECS_CHAT` | `120` | дедлайн всего задания `chat` |
+| `AI_CHAT_MAX_STEPS` | `5` | вызовов модели с инструментами; затем один без них |
+| `AI_CHAT_HISTORY_TURNS` / `AI_CHAT_HISTORY_TTL_SECS` | `6` / `1800` | пар «вопрос — ответ» в диалоге и их срок от последнего обращения |
+| `AI_CHAT_TOOL_RESULT_MAX_CHARS` | `6000` | результат инструмента длиннее обрезается («…(обрезано)») |
+| `LLM_MAX_TOKENS_CHAT` / `LLM_REASONING_CHAT` | `1024` / `none` | `max_tokens` и `reasoning_effort` чата через LM Studio; `default` — не передавать |
 | `PORT` / `HOST` | `8087` / `127.0.0.1` | |
 | `LOG_DIR` / `LOG_LEVEL` | stdout / debug | |
 
 LLM необязательна: недоступна — сервис стартует и отвечает
-`enabled=false`, клиенты работают без ИИ.
+`enabled=false`, клиенты работают без ИИ. Переменные чата тоже: пустые —
+сервис стартует, `chat` отвечает 503, остальное работает как раньше. Для
+чата LM Studio нужно окно `LLM_CONTEXT` не меньше 8192: схемы 6
+инструментов, история и результаты в 4096 не помещаются.
 
 ## LLM на хосте (LM Studio)
 
@@ -243,7 +359,17 @@ ctest --test-dir build --output-on-failure
   `too_many_active`, `unavailable`;
 - `ai_job_result_total{result}` — `draft`, `not_expense`, `rejected`, `failed_<причина>`;
 - `ai_job_duration_seconds{kind}`, `ai_queue_wait_seconds{kind}`,
-  `ai_queue_interactive`, `ai_queue_background`;
+  `ai_queue_interactive`, `ai_queue_background`, `ai_queue_cloud`;
+- `ai_job_create_total{result}` у `chat` ещё: `provider_unavailable`,
+  `invalid_token`;
+- `ai_chat_tokens_total{provider,direction}` — токены вызовов модели
+  (`input`/`output`), расход по провайдеру;
+- `ai_chat_jobs_total{provider,result}` — задания `chat` по исходу (`done`
+  или код отказа);
+- `ai_chat_tool_calls_total{tool,result}` — вызовы инструментов: `ok`,
+  `error` (`isError` wallet-mcp), `rpc_error`, `bad_args`, `unknown_tool`
+  (с `tool="unknown"`);
+- `ai_chat_steps` — гистограмма вызовов модели на задание;
 - `ai_jobs_by_platform_total{platform}` — откуда задания (web, telegram, …);
 - `ai_reports_errors_total{kind}` — ошибки запросов к wallet-report;
 - `jwt_claims_total{result}` — проверки iss/aud/scope;

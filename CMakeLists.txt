@@ -9,7 +9,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # репозитория wallet-common, обновляется его scripts/vendor.sh; руками не править.
 set(WALLET_COMMON_DIR ${CMAKE_SOURCE_DIR}/third_party/wallet-common)
 
-# OpenSSL — проверка подписи access-токена (RS256 по JWKS google-auth).
+# OpenSSL — проверка подписи access-токена (RS256 по JWKS google-auth) и
+# HTTPS до api.anthropic.com (провайдер claude, add-chat-agent):
+# cpp-httplib с CPPHTTPLIB_OPENSSL_SUPPORT, как у wallet-telegram.
 find_package(OpenSSL REQUIRED)
 # PostgreSQL — своя база ai (импорт выписок, add-statement-import).
 find_package(PostgreSQL REQUIRED)
@@ -61,6 +63,9 @@ add_library(wallet_ai_core STATIC
     src/access.cpp
     src/ai.cpp
     src/auth_exchange.cpp
+    src/chat.cpp
+    src/chat_metrics.cpp
+    src/chat_models.cpp
     src/db.cpp
     src/expense_check.cpp
     src/import_runner.cpp
@@ -71,6 +76,8 @@ add_library(wallet_ai_core STATIC
     src/llm_probe.cpp
     src/mcp_client.cpp
     src/parse_expense.cpp
+    src/providers.cpp
+    src/providers_pg.cpp
     src/session.cpp
     src/statement/chunk.cpp
     src/statement/pattern.cpp
@@ -100,12 +107,14 @@ target_include_directories(wallet_ai_core PUBLIC
     ${CMAKE_BINARY_DIR}/generated
 )
 target_compile_definitions(wallet_ai_core PUBLIC
+    CPPHTTPLIB_OPENSSL_SUPPORT
     $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>
 )
 target_compile_options(wallet_ai_core PUBLIC
     $<$<CXX_COMPILER_ID:MSVC>:/utf-8>
 )
 target_link_libraries(wallet_ai_core PUBLIC
+    OpenSSL::SSL
     OpenSSL::Crypto
     PostgreSQL::PostgreSQL
     Threads::Threads
