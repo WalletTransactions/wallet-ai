@@ -4,6 +4,7 @@
 #include <sstream>
 
 #include "nlohmann/json.hpp"
+#include "chat_metrics.hpp"
 #include "util/metrics.hpp"
 #include "version.hpp"
 
@@ -85,7 +86,8 @@ void handle_healthz(const httplib::Request&, httplib::Response& res) {
 // infra/monitoring/prometheus.yml). Без авторизации — как и /healthz: это
 // внутренняя ручка для скрейпа Prometheus, не часть публичного API сервиса.
 void handle_metrics(const httplib::Request&, httplib::Response& res) {
-    res.set_content(metrics::render(), "text/plain; version=0.0.4; charset=utf-8");
+    // Метрики чата — свой реестр (несколько меток, прибавка токенов).
+    res.set_content(metrics::render() + chat_metrics::render(), "text/plain; version=0.0.4; charset=utf-8");
 }
 
 // GET /version — версия ЭТОГО конкретного билда (см. CMakeLists.txt, "Версия

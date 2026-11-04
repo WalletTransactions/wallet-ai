@@ -2,10 +2,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <ctime>
 
+#include "chat.hpp"
 #include "parse_expense.hpp"
 #include "session.hpp"
 #include "util/log.hpp"
+#include "util/uuid.hpp"
 #include "util/metrics.hpp"
 
 using nlohmann::json;
@@ -33,12 +36,19 @@ void update_queue_gauges(const jobs::Store& store) {
                        static_cast<double>(store.queued(jobs::Priority::Interactive)));
     metrics::set_gauge("ai_queue_background", "Фоновых заданий в очереди.",
                        static_cast<double>(store.queued(jobs::Priority::Background)));
+    metrics::set_gauge("ai_queue_cloud", "Заданий в очереди облачной полосы.",
+                       static_cast<double>(store.queued(jobs::Priority::Interactive, jobs::Lane::Cloud)));
+}
+
+void count_create(const std::string& result) {
+    metrics::inc_counter("ai_job_create_total", "Создание заданий по исходу.", "result", result);
 }
 
 void handle_status(AppState& state, const httplib::Request& req, httplib::Response& res) {
     applog::set_route("GET /api/ai/status");
     if (!session::current_user(req, *state.jwks)) return reply_unauthenticated(res);
-    reply(res, 200, status_json(state.llm, state.llm_status.load(), state.imports_enabled && state.db_up.load()));
+    reply(res, 200, status_json(state.llm, state.llm_status.load(), state.imports_enabled && state.db_up.load(),
+                                state.chat_enabled));
 }
 
 void handle_create(AppState& state, const httplib::Request& req, httplib::Response& res) {
@@ -51,12 +61,18 @@ void handle_create(AppState& state, const httplib::Request& req, httplib::Respon
     std::string kind = body.value("kind", std::string{});
     // Виды импорта выписки создаёт только сам сервис (спека ai-jobs).
     if (kind == "extract_rows" || kind == "classify_rows") return reply(res, 400, {{"error", "unknown_kind"}});
-    if (kind != parse_expense::kKind) return reply(res, 400, {{"error", "неизвестный kind: " + kind}});
+    if (kind != parse_expense::kKind && kind != chat::kKind) {
+        return reply(res, 400, {{"error", "неизвестный kind: " + kind}});
+    }
     json input = body.value("input", json());
-    if (std::string err = parse_expense::validate_input(input); !err.empty()) return reply(res, 400, {{"error", err}});
     std::string key = body.contains("idempotency_key") && body["idempotency_key"].is_string()
                           ? body["idempotency_key"].get<std::string>()
                           : std::string{};
+    if (kind == chat::kKind) {
+        providers::Reply r = create_chat_job(state, *user, input, key);
+        return reply(res, r.status, r.body);
+    }
+    if (std::string err = parse_expense::validate_input(input); !err.empty()) return reply(res, 400, {{"error", err}});
 
     // ИИ выключен — сразу, без задания: клиент уходит на строгий формат.
     if (state.llm_status.load() != llm::ProbeResult::Ok) {
@@ -94,6 +110,42 @@ void handle_create(AppState& state, const httplib::Request& req, httplib::Respon
     reply(res, 202, {{"job_id", created.job.id}, {"status", jobs::to_string(created.job.status)}});
 }
 
+void handle_settings_get(AppState& state, const httplib::Request& req, httplib::Response& res) {
+    applog::set_route("GET /api/ai/settings");
+    auto user = session::current_user(req, *state.jwks);
+    if (!user) return reply_unauthenticated(res);
+    providers::SettingsRepo* repo = settings_repo(state);
+    providers::Reply r;
+    try {
+        r = providers::get_settings(*state.providers, repo, user->user_id, state.llm_status.load());
+    } catch (const std::exception& e) {
+        // База пропала посреди запроса — выбор по умолчанию, как без базы.
+        applog::warn("ai settings read failed", {{"event", "settings_error"}, {"error", e.what()}});
+        r = providers::get_settings(*state.providers, nullptr, user->user_id, state.llm_status.load());
+    }
+    reply(res, r.status, r.body);
+}
+
+void handle_settings_put(AppState& state, const httplib::Request& req, httplib::Response& res) {
+    applog::set_route("PUT /api/ai/settings");
+    auto user = session::current_user(req, *state.jwks);
+    if (!user) return reply_unauthenticated(res);
+    json body = json::parse(req.body, nullptr, /*allow_exceptions=*/false);
+    providers::Reply r;
+    try {
+        r = providers::put_settings(*state.providers, settings_repo(state), user->user_id, body,
+                                    state.llm_status.load(), static_cast<providers::Epoch>(std::time(nullptr)));
+    } catch (const std::exception& e) {
+        applog::warn("ai settings write failed", {{"event", "settings_error"}, {"error", e.what()}});
+        r = {503, {{"error", "settings_unavailable"}}};
+    }
+    if (r.status == 200) {
+        applog::info("ai settings changed", {{"event", "settings_changed"},
+                                              {"provider", r.body.value("provider", std::string{})}});
+    }
+    reply(res, r.status, r.body);
+}
+
 void handle_get(AppState& state, const httplib::Request& req, httplib::Response& res) {
     applog::set_route("GET /api/ai/jobs/:id");
     auto user = session::current_user(req, *state.jwks);
@@ -124,7 +176,7 @@ void handle_cancel(AppState& state, const httplib::Request& req, httplib::Respon
 
 } // namespace
 
-json status_json(const llm::Config& cfg, llm::ProbeResult status, bool statement_import) {
+json status_json(const llm::Config& cfg, llm::ProbeResult status, bool statement_import, bool chat) {
     bool enabled = status == llm::ProbeResult::Ok;
     json j;
     j["enabled"] = enabled;
@@ -134,7 +186,81 @@ json status_json(const llm::Config& cfg, llm::ProbeResult status, bool statement
     j["reason"] = enabled ? json(nullptr) : json(llm::to_string(status));
     j["features"] = enabled ? json::array({parse_expense::kKind}) : json::array();
     if (enabled && statement_import) j["features"].push_back("statement_import");
+    if (enabled && chat) j["features"].push_back(chat::kKind);
     return j;
+}
+
+providers::SettingsRepo* settings_repo(AppState& state) {
+    return state.settings_repo && state.db_up.load() ? state.settings_repo.get() : nullptr;
+}
+
+providers::Reply create_chat_job(AppState& state, const session::User& user, const json& input,
+                                 const std::string& idempotency_key) {
+    if (std::string err = chat::validate_input(input); !err.empty()) return {400, {{"error", err}}};
+    // Без wallet-mcp или секрета обмена чат выключен — google-auth не зовём.
+    if (!state.chat_enabled || !state.providers || !state.auth_exchange) {
+        count_create("unavailable");
+        return {503, {{"error", "unavailable"}}};
+    }
+
+    // Провайдер — выбранный пользователем на момент создания (без подмены).
+    providers::UserSettings settings;
+    if (providers::SettingsRepo* repo = settings_repo(state)) {
+        try {
+            settings = repo->get(user.user_id);
+        } catch (const std::exception& e) {
+            applog::warn("ai settings read failed", {{"event", "settings_error"}, {"error", e.what()}});
+        }
+    }
+    std::string provider = providers::effective_provider(*state.providers, settings);
+    const providers::ProviderInfo* info = state.providers->find(provider);
+    if (info == nullptr || !state.providers->availability(user.user_id, provider, state.llm_status.load()).available ||
+        state.providers->model(provider) == nullptr) {
+        count_create("provider_unavailable");
+        return {503, {{"error", "provider_unavailable"}, {"provider", provider}}};
+    }
+
+    // Токен для wallet-mcp — сейчас, пока токен пользователя свежий (D4).
+    auth_exchange::Result ex = state.auth_exchange->exchange(user.token);
+    if (ex.status == auth_exchange::Status::Invalid) {
+        applog::warn("token exchange refused", {{"event", "token_exchange_failed"}, {"error", ex.error}});
+        count_create("invalid_token");
+        return {401, {{"error", "invalid_token"}}};
+    }
+    if (ex.status != auth_exchange::Status::Ok) {
+        json fields = {{"event", "token_exchange_failed"}, {"error", ex.error}};
+        if (ex.invalid_client) {
+            applog::error("google-auth rejected AUTH_EXCHANGE_SECRET (invalid_client)", fields);
+        } else {
+            applog::warn("token exchange unavailable", fields);
+        }
+        count_create("unavailable");
+        return {503, {{"error", "unavailable"}}};
+    }
+
+    std::string conversation_id = input.contains("conversation_id") && input["conversation_id"].is_string()
+                                      ? input["conversation_id"].get<std::string>()
+                                      : uuidgen::v4();
+    jobs::Lane lane = info->cloud ? jobs::Lane::Cloud : jobs::Lane::Local;
+    jobs::Created created = state.jobs->create(user.user_id, chat::kKind, jobs::Priority::Interactive,
+                                               chat::make_job_input(input, conversation_id, provider, ex.access_token),
+                                               idempotency_key, lane);
+    if (created.error != jobs::CreateError::None) {
+        count_create(jobs::to_string(created.error));
+        return {429, {{"error", jobs::to_string(created.error)}}};
+    }
+    count_create(created.reused ? "reused" : "created");
+    metrics::inc_counter("ai_jobs_by_platform_total", "Созданные задания по платформе токена.", "platform",
+                         user.platform.empty() ? "web" : user.platform);
+    update_queue_gauges(*state.jobs);
+    applog::info("job created", {{"event", "job_created"},
+                                 {"job_id", created.job.id},
+                                 {"kind", chat::kKind},
+                                 {"provider", provider},
+                                 {"lane", jobs::to_string(lane)},
+                                 {"reused", created.reused},
+                                 {"platform", user.platform}});
+    return {202, {{"job_id", created.job.id}, {"status", jobs::to_string(created.job.status)}}};
 }
 
 json job_json(const jobs::Job& job) {
@@ -152,6 +278,7 @@ parse_expense::Outcome run_job(AppState& state, const jobs::Job& job) {
     if (job.kind == parse_expense::kKind) {
         return parse_expense::run(job.input, *state.llm_client, state.parse_expense_opts);
     }
+    if (job.kind == chat::kKind && state.chat_agent) return chat::run(job, *state.chat_agent);
     auto handler = state.job_handlers.find(job.kind);
     if (handler != state.job_handlers.end()) return handler->second(job);
     // Неизвестный вид — без вызова LLM.
@@ -167,15 +294,19 @@ void register_routes(httplib::Server& svr, AppState& state) {
             [&state](const httplib::Request& req, httplib::Response& res) { handle_status(state, req, res); });
     svr.Post("/api/ai/jobs",
              [&state](const httplib::Request& req, httplib::Response& res) { handle_create(state, req, res); });
+    svr.Get("/api/ai/settings",
+            [&state](const httplib::Request& req, httplib::Response& res) { handle_settings_get(state, req, res); });
+    svr.Put("/api/ai/settings",
+            [&state](const httplib::Request& req, httplib::Response& res) { handle_settings_put(state, req, res); });
     svr.Get(R"(/api/ai/jobs/([0-9a-fA-F-]{36}))",
             [&state](const httplib::Request& req, httplib::Response& res) { handle_get(state, req, res); });
     svr.Delete(R"(/api/ai/jobs/([0-9a-fA-F-]{36}))",
                [&state](const httplib::Request& req, httplib::Response& res) { handle_cancel(state, req, res); });
 }
 
-void run_worker(AppState& state) {
+void run_worker(AppState& state, jobs::Lane lane) {
     for (;;) {
-        auto job = state.jobs->take();
+        auto job = state.jobs->take(lane);
         if (!job) return;
         update_queue_gauges(*state.jobs);
         double queue_secs = ms_between(job->created, job->started) / 1000.0;
@@ -204,6 +335,7 @@ void run_worker(AppState& state) {
         details["event"] = "job_finished";
         details["job_id"] = job->id;
         details["kind"] = job->kind;
+        details["lane"] = jobs::to_string(job->lane);
         details["result"] = result;
         details["queue_ms"] = static_cast<long>(queue_secs * 1000);
         details["run_ms"] = static_cast<long>(run_secs * 1000);

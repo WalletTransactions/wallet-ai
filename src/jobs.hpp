@@ -31,6 +31,13 @@ bool is_final(Status s);
 // импорта): трата пользователя не ждёт пачку выписки.
 enum class Priority { Interactive, Background };
 
+// Полоса очереди (change add-chat-agent, D5): локальная — GPU (LM Studio,
+// parse_expense, импорт), облачная — Claude. У каждой свои воркеры, облачное
+// задание не ждёт GPU. Фоновая очередь есть только у Local; облачное
+// задание всегда интерактивное. AI_QUEUE_MAX — на полосу.
+enum class Lane { Local, Cloud };
+const char* to_string(Lane l);
+
 using Clock = std::chrono::steady_clock;
 
 struct Job {
@@ -38,6 +45,7 @@ struct Job {
     std::string user_id;
     std::string kind;
     Priority priority = Priority::Interactive;
+    Lane lane = Lane::Local;
     std::string idempotency_key;
     // Вход живёт до завершения задания, результат — до TTL: в них тексты
     // трат (приватность, §5).
@@ -55,7 +63,7 @@ struct Job {
 };
 
 struct Limits {
-    std::size_t max_queued_interactive = 20; // больше — 429 busy
+    std::size_t max_queued_interactive = 20; // на полосу; больше — 429 busy
     std::size_t max_active_per_user = 3;     // незавершённых заданий
     int max_per_minute = 10;                 // новых заданий на пользователя
     std::chrono::seconds ttl{600};           // сколько хранить завершённое
@@ -78,8 +86,9 @@ public:
 
     // idempotency_key — пусто, если не нужен. Повтор с тем же ключом от того
     // же пользователя возвращает существующее задание (лимиты не трогает).
+    // lane — полоса провайдера задания (D5); Cloud всегда интерактивная.
     Created create(const std::string& user_id, const std::string& kind, Priority priority, nlohmann::json input,
-                   const std::string& idempotency_key);
+                   const std::string& idempotency_key, Lane lane = Lane::Local);
 
     // Фоновое задание импорта: мимо лимитов пользователя (busy,
     // too_many_active, rate_limited) — у импорта свои (один в работе на
@@ -96,9 +105,10 @@ public:
     // false — нет задания (или чужое), или оно уже завершено.
     bool cancel(const std::string& id, const std::string& user_id);
 
-    // Воркер: следующее задание (интерактивные раньше фоновых), переводит его
-    // в Running. Блокирует, пока заданий нет; nullopt — после stop().
-    std::optional<Job> take();
+    // Воркер полосы lane: следующее задание (интерактивные раньше фоновых),
+    // переводит его в Running. Блокирует, пока в полосе заданий нет;
+    // nullopt — после stop(). Задания чужой полосы не берёт.
+    std::optional<Job> take(Lane lane = Lane::Local);
 
     void complete(const std::string& id, Status status, nlohmann::json result, const std::string& failure);
 
@@ -107,7 +117,7 @@ public:
 
     void stop();
 
-    std::size_t queued(Priority p) const;
+    std::size_t queued(Priority p, Lane lane = Lane::Local) const;
 
 private:
     bool user_over_rate(const std::string& user_id, Clock::time_point now);
@@ -116,12 +126,14 @@ private:
     Limits limits_;
     NowFn now_;
     mutable std::mutex mu_;
-    std::condition_variable work_cv_;   // появилось задание / stop
+    std::condition_variable work_cv_;       // появилось локальное задание / stop
+    std::condition_variable cloud_work_cv_; // появилось облачное задание / stop
     std::condition_variable change_cv_; // задание завершилось — для long-poll
     bool stopped_ = false;
     std::unordered_map<std::string, Job> jobs_;
     std::deque<std::string> interactive_;
     std::deque<std::string> background_;
+    std::deque<std::string> cloud_; // облачная полоса — одна интерактивная очередь
     std::map<std::pair<std::string, std::string>, std::string> by_key_; // (user, key) -> id
     std::unordered_map<std::string, std::deque<Clock::time_point>> created_by_user_;
 };

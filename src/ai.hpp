@@ -3,13 +3,17 @@
 //   POST   /api/ai/jobs              — создать задание -> 202 {job_id}
 //   GET    /api/ai/jobs/{id}?wait=N  — статус и результат, long-poll ≤ 25 с
 //   DELETE /api/ai/jobs/{id}         — отменить
-// и воркер, который выполняет задания (main.cpp запускает LLM_MAX_CONCURRENT).
+//   GET/PUT /api/ai/settings         — провайдер чата и согласие (add-chat-agent)
+// и воркеры, которые выполняют задания: LLM_MAX_CONCURRENT на локальной
+// полосе, AI_CLOUD_MAX_CONCURRENT на облачной (main.cpp).
 #pragma once
 
 #include "app_state.hpp"
 #include "httplib.h"
 #include "nlohmann/json.hpp"
 #include "parse_expense.hpp"
+#include "providers.hpp"
+#include "session.hpp"
 
 namespace aiapi {
 
@@ -21,18 +25,30 @@ inline constexpr int kMaxWaitSecs = 25;
 // заданий, которые сейчас можно создать.
 // statement_import — импорт выписок настроен и база ai отвечает; в features
 // он попадает только вместе с включённым ИИ.
-nlohmann::json status_json(const llm::Config& cfg, llm::ProbeResult status, bool statement_import = false);
+// chat — вид chat включён конфигурацией (WALLET_MCP_URL, AUTH_EXCHANGE_SECRET);
+// в features он попадает тоже только вместе с включённым ИИ.
+nlohmann::json status_json(const llm::Config& cfg, llm::ProbeResult status, bool statement_import = false,
+                           bool chat = false);
 
 // Снимок задания для GET — чистая функция.
 nlohmann::json job_json(const jobs::Job& job);
 
 void register_routes(httplib::Server& svr, AppState& state);
 
+// Создание задания chat для проверенного пользователя (тело POST
+// /api/ai/jobs уже разобрано): проверка input, включение конфигурацией,
+// провайдер и полоса, обмен токена. Без httplib — для юнит-тестов.
+providers::Reply create_chat_job(AppState& state, const session::User& user, const nlohmann::json& input,
+                                 const std::string& idempotency_key);
+
+// Репозиторий настроек, если база ai отвечает; иначе nullptr.
+providers::SettingsRepo* settings_repo(AppState& state);
+
 // Обработчик задания по kind: parse_expense, виды из state.job_handlers
 // (импорт выписки), неизвестный — failed: internal без вызова LLM.
 parse_expense::Outcome run_job(AppState& state, const jobs::Job& job);
 
-// Цикл воркера: берёт задания, пока store не остановлен.
-void run_worker(AppState& state);
+// Цикл воркера полосы lane: берёт задания, пока store не остановлен.
+void run_worker(AppState& state, jobs::Lane lane = jobs::Lane::Local);
 
 } // namespace aiapi

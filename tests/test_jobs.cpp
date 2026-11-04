@@ -158,3 +158,66 @@ TEST(jobs_stop_unblocks_take) {
     s.stop();
     t.join();
 }
+
+// --- Полосы очереди (add-chat-agent, D5) ---
+
+TEST(jobs_cloud_job_taken_while_local_worker_busy) {
+    FakeClock clock;
+    jobs::Store s(limits(), clock.fn());
+    auto local = s.create("u1", "parse_expense", jobs::Priority::Interactive, json::object(), "");
+    auto running = s.take(jobs::Lane::Local); // локальный воркер занят
+    REQUIRE(running.has_value());
+    CHECK_EQ(running->id, local.job.id);
+    auto queued_local = s.create("u2", "chat", jobs::Priority::Interactive, json::object(), "");
+    auto cloud = s.create("u3", "chat", jobs::Priority::Interactive, json::object(), "", jobs::Lane::Cloud);
+    REQUIRE(cloud.error == jobs::CreateError::None);
+    CHECK(cloud.job.lane == jobs::Lane::Cloud);
+    auto taken = s.take(jobs::Lane::Cloud);
+    REQUIRE(taken.has_value());
+    CHECK_EQ(taken->id, cloud.job.id); // облачная полоса не ждёт локальную
+    CHECK(taken->status == jobs::Status::Running);
+    CHECK_EQ(s.queued(jobs::Priority::Interactive, jobs::Lane::Cloud), 0u);
+    CHECK_EQ(s.queued(jobs::Priority::Interactive, jobs::Lane::Local), 1u); // локальное ждёт свой воркер
+    auto next_local = s.take(jobs::Lane::Local);
+    CHECK_EQ(next_local->id, queued_local.job.id);
+}
+
+TEST(jobs_busy_counted_per_lane) {
+    FakeClock clock;
+    jobs::Store s(limits(), clock.fn()); // AI_QUEUE_MAX = 3 на полосу
+    for (int i = 0; i < 3; ++i) {
+        CHECK(s.create("l" + std::to_string(i), "k", jobs::Priority::Interactive, {}, "").error ==
+              jobs::CreateError::None);
+    }
+    CHECK(s.create("l9", "k", jobs::Priority::Interactive, {}, "").error == jobs::CreateError::Busy);
+    // Локальная полна, облачная — нет.
+    for (int i = 0; i < 3; ++i) {
+        CHECK(s.create("c" + std::to_string(i), "chat", jobs::Priority::Interactive, {}, "", jobs::Lane::Cloud).error ==
+              jobs::CreateError::None);
+    }
+    CHECK(s.create("c9", "chat", jobs::Priority::Interactive, {}, "", jobs::Lane::Cloud).error ==
+          jobs::CreateError::Busy);
+    CHECK_EQ(s.queued(jobs::Priority::Interactive, jobs::Lane::Cloud), 3u);
+    CHECK_EQ(s.queued(jobs::Priority::Interactive), 3u);
+}
+
+TEST(jobs_background_still_yields_and_cloud_cancel) {
+    FakeClock clock;
+    jobs::Store s(limits(), clock.fn());
+    auto bg = s.create("u1", "classify_rows", jobs::Priority::Background, {}, "");
+    auto cloud = s.create("u2", "chat", jobs::Priority::Background, {}, "", jobs::Lane::Cloud);
+    CHECK(cloud.job.priority == jobs::Priority::Interactive); // у облачной полосы фоновой очереди нет
+    auto fg = s.create("u3", "parse_expense", jobs::Priority::Interactive, {}, "");
+    CHECK_EQ(s.take(jobs::Lane::Local)->id, fg.job.id); // фоновое уступает интерактивному
+    CHECK_EQ(s.take(jobs::Lane::Local)->id, bg.job.id);
+    CHECK(s.cancel(cloud.job.id, "u2"));
+    CHECK_EQ(s.queued(jobs::Priority::Interactive, jobs::Lane::Cloud), 0u);
+}
+
+TEST(jobs_stop_unblocks_cloud_take) {
+    jobs::Store s(limits());
+    std::thread t([&] { CHECK(!s.take(jobs::Lane::Cloud).has_value()); });
+    std::this_thread::sleep_for(20ms);
+    s.stop();
+    t.join();
+}

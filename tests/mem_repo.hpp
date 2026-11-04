@@ -163,3 +163,44 @@ public:
         if (static_cast<int>(v.size()) > keep) v.resize(static_cast<std::size_t>(keep));
     }
 };
+
+#include <stdexcept>
+
+#include "providers.hpp"
+
+// providers::SettingsRepo в памяти — для тестов /api/ai/settings и выбора
+// провайдера задания chat без Postgres. up = false — как упавшая база.
+class MemSettingsRepo : public providers::SettingsRepo {
+public:
+    bool up = true;
+    std::map<std::string, std::string> provider_by_user;
+    std::map<std::pair<std::string, std::string>, providers::Epoch> consent; // (user, provider) -> время
+
+    providers::UserSettings get(const std::string& user_id) override {
+        check();
+        providers::UserSettings s;
+        auto it = provider_by_user.find(user_id);
+        if (it != provider_by_user.end()) s.provider = it->second;
+        for (const auto& [k, at] : consent) {
+            if (k.first == user_id) s.consents[k.second] = at;
+        }
+        return s;
+    }
+    void set_provider(const std::string& user_id, const std::string& provider) override {
+        check();
+        provider_by_user[user_id] = provider;
+    }
+    void set_consent(const std::string& user_id, const std::string& provider, providers::Epoch at) override {
+        check();
+        consent[{user_id, provider}] = at;
+    }
+    void revoke_consent(const std::string& user_id, const std::string& provider) override {
+        check();
+        consent.erase({user_id, provider});
+    }
+
+private:
+    void check() const {
+        if (!up) throw std::runtime_error("база ai недоступна");
+    }
+};

@@ -17,6 +17,8 @@ const char* to_string(Status s) {
 
 bool is_final(Status s) { return s == Status::Done || s == Status::Failed || s == Status::Cancelled; }
 
+const char* to_string(Lane l) { return l == Lane::Cloud ? "cloud" : "local"; }
+
 const char* to_string(CreateError e) {
     switch (e) {
     case CreateError::None: return "none";
@@ -44,7 +46,8 @@ std::size_t Store::active_of(const std::string& user_id) const {
 }
 
 Created Store::create(const std::string& user_id, const std::string& kind, Priority priority, nlohmann::json input,
-                      const std::string& idempotency_key) {
+                      const std::string& idempotency_key, Lane lane) {
+    if (lane == Lane::Cloud) priority = Priority::Interactive;
     std::lock_guard<std::mutex> lock(mu_);
     Created out;
     auto now = now_();
@@ -62,7 +65,8 @@ Created Store::create(const std::string& user_id, const std::string& kind, Prior
         }
     }
 
-    if (priority == Priority::Interactive && interactive_.size() >= limits_.max_queued_interactive) {
+    const auto& lane_queue = lane == Lane::Cloud ? cloud_ : interactive_;
+    if (priority == Priority::Interactive && lane_queue.size() >= limits_.max_queued_interactive) {
         out.error = CreateError::Busy;
         return out;
     }
@@ -80,15 +84,20 @@ Created Store::create(const std::string& user_id, const std::string& kind, Prior
     job.user_id = user_id;
     job.kind = kind;
     job.priority = priority;
+    job.lane = lane;
     job.idempotency_key = idempotency_key;
     job.input = std::move(input);
     job.created = now;
     created_by_user_[user_id].push_back(now);
     if (!idempotency_key.empty()) by_key_[{user_id, idempotency_key}] = job.id;
-    (priority == Priority::Interactive ? interactive_ : background_).push_back(job.id);
+    if (lane == Lane::Cloud) {
+        cloud_.push_back(job.id);
+    } else {
+        (priority == Priority::Interactive ? interactive_ : background_).push_back(job.id);
+    }
     out.job = job;
     jobs_.emplace(job.id, std::move(job));
-    work_cv_.notify_one();
+    (lane == Lane::Cloud ? cloud_work_cv_ : work_cv_).notify_one();
     return out;
 }
 
@@ -132,7 +141,9 @@ bool Store::cancel(const std::string& id, const std::string& user_id) {
     if (it == jobs_.end() || it->second.user_id != user_id || is_final(it->second.status)) return false;
     Job& job = it->second;
     if (job.status == Status::Queued) {
-        auto& q = job.priority == Priority::Interactive ? interactive_ : background_;
+        auto& q = job.lane == Lane::Cloud                    ? cloud_
+                  : job.priority == Priority::Interactive ? interactive_
+                                                          : background_;
         for (auto qi = q.begin(); qi != q.end(); ++qi) {
             if (*qi == id) {
                 q.erase(qi);
@@ -151,11 +162,15 @@ bool Store::cancel(const std::string& id, const std::string& user_id) {
     return true;
 }
 
-std::optional<Job> Store::take() {
+std::optional<Job> Store::take(Lane lane) {
     std::unique_lock<std::mutex> lock(mu_);
-    work_cv_.wait(lock, [this] { return stopped_ || !interactive_.empty() || !background_.empty(); });
+    if (lane == Lane::Cloud) {
+        cloud_work_cv_.wait(lock, [this] { return stopped_ || !cloud_.empty(); });
+    } else {
+        work_cv_.wait(lock, [this] { return stopped_ || !interactive_.empty() || !background_.empty(); });
+    }
     if (stopped_) return std::nullopt;
-    auto& q = !interactive_.empty() ? interactive_ : background_;
+    auto& q = lane == Lane::Cloud ? cloud_ : (!interactive_.empty() ? interactive_ : background_);
     std::string id = q.front();
     q.pop_front();
     Job& job = jobs_.at(id);
@@ -201,11 +216,13 @@ void Store::stop() {
     std::lock_guard<std::mutex> lock(mu_);
     stopped_ = true;
     work_cv_.notify_all();
+    cloud_work_cv_.notify_all();
     change_cv_.notify_all();
 }
 
-std::size_t Store::queued(Priority p) const {
+std::size_t Store::queued(Priority p, Lane lane) const {
     std::lock_guard<std::mutex> lock(mu_);
+    if (lane == Lane::Cloud) return p == Priority::Interactive ? cloud_.size() : 0;
     return p == Priority::Interactive ? interactive_.size() : background_.size();
 }
 
