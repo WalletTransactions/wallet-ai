@@ -8,6 +8,9 @@
 #
 # Переменные (все необязательные):
 #   LMS_BIN          путь к lms                    (~/.lmstudio/bin/lms)
+#   LMS_APP          приложение LM Studio          (/opt/LM-Studio/lm-studio)
+#   LMS_APP_LOG      вывод приложения при запуске  (~/.lmstudio/lm-studio-launch.log)
+#   LMS_DISPLAY      дисплей сессии при запуске по SSH (:0)
 #   LMS_MODEL_KEY    модель из `lms ls`            (google/gemma-4-e4b)
 #   LMS_IDENTIFIER   id в API = LLM_MODEL          (wallet-parse)
 #   LMS_CONTEXT      контекст, токенов             (8192 — = LLM_CONTEXT wallet-ai;
@@ -26,9 +29,16 @@
 #
 # Модель грузится без --ttl: авто-выгрузка по простою вернула бы JIT-загрузку
 # (10–30 с) на первом запросе — дольше таймаута wallet-ai.
+#
+# Демон LM Studio — то же Electron-приложение, и без дисплея (запуск по SSH)
+# оно падает с «Missing X server», а `lms` пишет только «Timed out waiting
+# for LM Studio daemon». Поэтому, если приложение не запущено, скрипт сам
+# поднимает его на дисплее графической сессии пользователя.
 set -euo pipefail
 
 LMS_BIN="${LMS_BIN:-$HOME/.lmstudio/bin/lms}"
+LMS_APP="${LMS_APP:-/opt/LM-Studio/lm-studio}"
+LMS_APP_LOG="${LMS_APP_LOG:-$HOME/.lmstudio/lm-studio-launch.log}"
 LMS_MODEL_KEY="${LMS_MODEL_KEY:-google/gemma-4-e4b}"
 LMS_IDENTIFIER="${LMS_IDENTIFIER:-wallet-parse}"
 LMS_CONTEXT="${LMS_CONTEXT:-8192}"
@@ -47,8 +57,47 @@ if [[ -z "${LLM_API_KEY:-}" && -r "$LMS_SECRETS_FILE" ]]; then
     [[ -n "$LLM_API_KEY" ]] && echo "токен LM Studio — из $LMS_SECRETS_FILE"
 fi
 
-# 1. Сервер. `lms` сам будит демон LM Studio; первый вызов после загрузки
-#    системы может занять до минуты.
+# Окружение графической сессии пользователя для запуска из SSH: выставляет
+# и экспортирует DISPLAY / XAUTHORITY / WAYLAND_DISPLAY (и DBUS_SESSION_BUS_ADDRESS).
+# Возвращает 1, если сессии нет (никто не вошёл на рабочий стол).
+session_display_env() {
+    local rt="/run/user/$(id -u)" auth
+    # GNOME/mutter: XWayland-авторизация с новым суффиксом на каждый вход —
+    # берём самую свежую. `|| true`: без совпадений ls падает, а pipefail+set -e
+    # уронили бы весь скрипт вместо return 1.
+    auth="$(ls -t "$rt"/.mutter-Xwaylandauth.* 2>/dev/null | head -n 1 || true)"
+    # Чистый X11 без Wayland.
+    [[ -z "$auth" && -r "$HOME/.Xauthority" ]] && auth="$HOME/.Xauthority"
+    [[ -n "$auth" ]] || return 1
+    # Номера дисплея в файле mutter нет (запись на любой дисплей) — :0 по умолчанию.
+    export DISPLAY="${LMS_DISPLAY:-:0}" XAUTHORITY="$auth"
+    [[ -S "$rt/wayland-0" ]] && export WAYLAND_DISPLAY=wayland-0
+    [[ -S "$rt/bus" && -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]] \
+        && export DBUS_SESSION_BUS_ADDRESS="unix:path=$rt/bus"
+    return 0
+}
+
+# 0. Приложение. Уже запущено (GUI или сервис) — `lms` подключится сам.
+if ! pgrep -f "^$LMS_APP" >/dev/null; then
+    [[ -x "$LMS_APP" ]] || { echo "LM Studio не найдена: $LMS_APP (LMS_APP=...)" >&2; exit 1; }
+    if [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] && ! session_display_env; then
+        echo "LM Studio не запущена, а дисплея нет: войди в графическую сессию на хосте" \
+             "или запусти LM Studio там вручную, затем повтори" >&2
+        exit 1
+    fi
+    echo "запускаю LM Studio на дисплее ${DISPLAY:-wayland:$WAYLAND_DISPLAY} (лог: $LMS_APP_LOG)"
+    setsid nohup "$LMS_APP" >"$LMS_APP_LOG" 2>&1 </dev/null &
+    # Без дисплея или с чужим XAUTHORITY приложение выходит за секунду-две.
+    for _ in 1 2 3 4 5; do
+        sleep 1
+        pgrep -f "^$LMS_APP" >/dev/null && continue
+        echo "LM Studio завершилась при запуске:" >&2
+        tail -n 5 "$LMS_APP_LOG" >&2
+        exit 1
+    done
+fi
+
+# 1. Сервер. Первый вызов после запуска приложения может занять до минуты.
 if "$LMS_BIN" server status --json 2>/dev/null | grep -q '"running":true'; then
     echo "сервер уже запущен"
 else
