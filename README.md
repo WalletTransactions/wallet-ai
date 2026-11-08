@@ -115,7 +115,7 @@ curl "$GW/api/ai/jobs/$ID?wait=25" -H "Authorization: Bearer $T"
   `AI_CHAT_HISTORY_TTL_SECS` от последнего обращения. Результаты
   инструментов не хранятся. Нет `conversation_id` — сервис создаёт UUID и
   возвращает его. Рестарт историю теряет.
-- **Промпт** — [`prompts/chat.txt`](prompts/chat.txt) (`# version: chat-v1`),
+- **Промпт** — [`prompts/chat.txt`](prompts/chat.txt) (`# version: chat-v3`),
   подстановки `{today}`, `{weekday}`, `{time}` (из `input.now`, иначе UTC
   сервера) и `{mcp_instructions}`. Нет файла — сервис не стартует.
 
