@@ -11,11 +11,11 @@
 
 ## 2. Выкат
 
-- [ ] 2.1 PR в main, CI зелёный, rc wallet-ai на test. Проверка: строка `ok` в `~/.local/state/wallet-envs/test/history`, в журнале wallet-ai — `chat-v3`
+- [x] 2.1 PR в main, CI зелёный, rc wallet-ai на test. Проверка: строка `ok` в `~/.local/state/wallet-envs/test/history`, в журнале wallet-ai — `chat-v3` — выполнено 2026-11-08: PR #14, CI зелёный, `v0.2.0-rc.3` — `ok` в history 20:19:57 UTC, `chat_config` пишет `prompt_version: chat-v3`
 
 ## 3. Живые прогоны на test
 
-- [ ] 3.1 «Сколько в среднем в месяц я трачу на алкоголь за два года». Проверка: в журнале wallet-mcp — `spending_by_category_by_month` с `categories: ["Alcohol"]`, ответ называет `avg_per_month` из инструмента
-- [ ] 3.2 «Насколько июнь–август дороже остальных месяцев по категориям, без ремонта». Проверка: в журнале — `exclude_categories` без `categories`, `months_of_year` [6,7,8] и остальные месяцы за один и тот же период длиннее года, ответ сравнивает `avg_per_month`
-- [ ] 3.3 «Когда я последний раз стригся?». Проверка: в журнале — `search_operations` с несколькими вариантами в `text`, ответ — 04.03.2026
-- [ ] 3.4 Отметки в tasks.md wallet-mcp: `add-category-analytics` 6.2, `search-operations-variants-and-paging` 4.2, `search-default-period` 2.2 (не помогло с двух попыток — «качество модели», D7)
+- [ ] 3.1 «Сколько в среднем в месяц я трачу на алкоголь за два года». Проверка: в журнале wallet-mcp — `spending_by_category_by_month` с `categories: ["Alcohol"]`, ответ называет `avg_per_month` из инструмента — Тест: [wallet-ai#15](https://github.com/WalletTransactions/wallet-ai/issues/15)
+- [ ] 3.2 «Насколько июнь–август дороже остальных месяцев по категориям, без ремонта». Проверка: в журнале — `exclude_categories` без `categories`, `months_of_year` [6,7,8] и остальные месяцы за один и тот же период длиннее года, ответ сравнивает `avg_per_month` — Тест: [wallet-ai#15](https://github.com/WalletTransactions/wallet-ai/issues/15)
+- [ ] 3.3 «Когда я последний раз стригся?». Проверка: в журнале — `search_operations` с несколькими вариантами в `text`, ответ — 04.03.2026 — Тест: [wallet-ai#15](https://github.com/WalletTransactions/wallet-ai/issues/15)
+- [ ] 3.4 Отметки в tasks.md wallet-mcp: `add-category-analytics` 6.2, `search-operations-variants-and-paging` 4.2, `search-default-period` 2.2 (не помогло с двух попыток — «качество модели», D7) — Тест: [wallet-ai#15](https://github.com/WalletTransactions/wallet-ai/issues/15)
