@@ -212,7 +212,12 @@ Accounts parse_accounts(const nlohmann::json& body) {
         std::string uuid = str(a, "uuid");
         if (uuid.empty()) continue;
         std::string kind = str(a, "kind");
-        if (kind == "wallet") {
+        // Долговой кошелёк (change debts: counterparty_uuid не null) — не для
+        // трат: трата с него — возврат долга, а этого ни бот, ни ИИ не умеют.
+        // Поля нет (wallet-report до debts) — кошелёк обычный.
+        auto cp = a.find("counterparty_uuid");
+        bool is_debt = cp != a.end() && !cp->is_null();
+        if (kind == "wallet" && !is_debt) {
             out.wallets.push_back(
                 {uuid, str(a, "name"), str(a, "iso_code"), str(a, "symbol"), precision_of(str(a, "precision"))});
         } else if (kind == "category" && a.value("system_kind", 0) == 0) {

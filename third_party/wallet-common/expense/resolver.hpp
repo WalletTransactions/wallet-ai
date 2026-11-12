@@ -31,8 +31,9 @@ struct Category {
 };
 
 // Справочник счетов пользователя из GET /api/reports/accounts: только живые
-// и не архивные, категории — без системных (Transfer и т.п.). Порядок — как
-// в ответе (по имени), в нём же показываются кандидаты.
+// и не архивные, категории — без системных (Transfer и т.п.), кошельки — без
+// долговых (counterparty_uuid не null, change debts). Порядок — как в ответе
+// (по имени), в нём же показываются кандидаты.
 struct Accounts {
     std::vector<Wallet> wallets;
     std::vector<Category> categories;
@@ -89,7 +90,8 @@ bool fits_precision(const parser::ParsedExpense& e, const Wallet& w);
 parser::Names names_for_parser(const Accounts& a);
 
 // Ответ GET /api/reports/accounts (без kind — кошельки и категории разом).
-// Системные категории (Transfer, Transfer commission) — не для трат.
+// Системные категории (Transfer, Transfer commission) и долговые кошельки
+// (counterparty_uuid не null; поля нет — не долговой) — не для трат.
 Accounts parse_accounts(const nlohmann::json& body);
 
 } // namespace resolver
