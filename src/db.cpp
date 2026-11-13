@@ -7,6 +7,7 @@
 
 #include "nlohmann/json.hpp"
 #include "util/log.hpp"
+#include "util/pg_recover.hpp"
 
 namespace {
 
@@ -39,9 +40,16 @@ Database::Database(const std::string& conninfo, bool log_params,
         conn_ = nullptr;
         throw std::runtime_error("не удалось подключиться к Postgres: " + err);
     }
+    // Раз в минуту проверяем простаивающее соединение и переоткрываем его, если
+    // оно умерло. mutex_ занят — запрос идёт прямо сейчас, соединение живо.
+    keepalive_ = std::make_unique<pg_recover::Keepalive>([this] {
+        std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+        if (lock.owns_lock()) pg_recover::probe(conn_);
+    });
 }
 
 Database::~Database() {
+    keepalive_.reset(); // остановить поток до PQfinish
     if (conn_ != nullptr) PQfinish(conn_);
 }
 
@@ -68,26 +76,12 @@ Result Database::exec(const std::string& sql, const std::vector<std::string>& pa
 
 Result Database::exec_locked(const std::string& sql, const std::vector<std::string>& params,
                               const std::vector<std::string>& param_names) {
-    // Реальный случай (2026-09-17, test-wallet-report-loadtest #15): одно из
-    // N соединений пула умерло без единого сообщения об ошибке (PQexecParams
-    // на мёртвом conn_ вернул результат с пустым PQresultErrorMessage — не
-    // "server closed the connection unexpectedly", как в похожем случае у
-    // wallet-api, а вовсе без текста) — и с этого момента каждый acquire(),
-    // которому доставался именно этот слот пула, ронял ВСЕ report-эндпоинты
-    // разом. Тот же фикс, что уже стоит в wallet-api/google-auth (см. их
-    // db.cpp): PQreset() переоткрывает соединение теми же параметрами, что
-    // были у PQconnectdb() при создании этой Database.
-    if (PQstatus(conn_) != CONNECTION_OK) {
-        applog::warn("db connection is down, reconnecting");
-        PQreset(conn_);
-        if (PQstatus(conn_) != CONNECTION_OK) {
-            std::string err = PQerrorMessage(conn_);
-            applog::error("db reconnect failed", {{"event", "db_reconnect_failed"}, {"error", err}});
-            throw std::runtime_error("Postgres: соединение потеряно, переподключиться не удалось: " + err);
-        }
-        applog::info("db reconnected", {{"event", "db_reconnected"}});
-    }
-
+    // Мёртвое соединение (рестарт Postgres, обрыв сети) обрабатывает
+    // pg_recover::exec_params (util/pg_recover.hpp): проверка сокета ПЕРЕД
+    // запросом, а не только PQstatus (он не видит умерший сокет до первой
+    // неудачной записи), и один повтор для чтения, оборванного в ходе запроса.
+    // Запись автоматически не повторяется, внутри транзакции PQreset не
+    // вызывается.
     std::vector<const char*> values;
     values.reserve(params.size());
     for (const auto& p : params) values.push_back(p.c_str());
@@ -100,9 +94,8 @@ Result Database::exec_locked(const std::string& sql, const std::vector<std::stri
     // одного запроса включала бы чужое время выполнения — вводило бы в
     // заблуждение).
     auto started = std::chrono::steady_clock::now();
-    PGresult* res = PQexecParams(conn_, sql.c_str(), static_cast<int>(values.size()),
-                                  nullptr /* типы параметров — пусть Postgres выведет сам */,
-                                  values.data(), nullptr, nullptr, 0 /* текстовый формат */);
+    PGresult* res = pg_recover::exec_params(conn_, sql, static_cast<int>(values.size()), values.data(),
+                                            in_transaction_);
     double duration_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
             .count();
@@ -133,7 +126,10 @@ Result Database::exec_locked(const std::string& sql, const std::vector<std::stri
 
     ExecStatusType status = PQresultStatus(res);
     if (status != PGRES_TUPLES_OK && status != PGRES_COMMAND_OK) {
-        std::string err = PQresultErrorMessage(res);
+        // res == nullptr — соединение потеряно и не переоткрылось: причина в
+        // PQerrorMessage(conn_), а не в результате.
+        std::string err = res != nullptr ? PQresultErrorMessage(res) : "";
+        if (err.empty()) err = PQerrorMessage(conn_);
         // Готовые, отдельные поля вместо разбора текста ошибки (см. QueryError
         // в db.hpp, зачем) — оба могут быть nullptr, если Postgres не заполнил
         // их для этого класса ошибки (не всякая ошибка — про constraint).
@@ -182,13 +178,16 @@ Result Database::exec_locked(const std::string& sql, const std::vector<std::stri
 
 Database::Transaction::Transaction(Database& db) : db_(db), lock_(db.mutex_) {
     db_.exec_locked("BEGIN");
+    db_.in_transaction_ = true; // с этого момента PQreset запрещён (потерял бы BEGIN)
 }
 
 Database::Transaction::~Transaction() {
     if (committed_) return;
     try {
         db_.exec_locked("ROLLBACK");
+        db_.in_transaction_ = false;
     } catch (const std::exception& ex) {
+        db_.in_transaction_ = false; // соединение мертво: транзакции на сервере уже нет
         // Деструктор не имеет права бросать — если соединение уже развалилось
         // (та же причина, по которой упал предыдущий exec() в этой
         // транзакции), ROLLBACK тоже не пройдёт; просто фиксируем в лог.
@@ -203,6 +202,7 @@ Result Database::Transaction::exec(const std::string& sql, const std::vector<std
 
 void Database::Transaction::commit() {
     db_.exec_locked("COMMIT");
+    db_.in_transaction_ = false;
     committed_ = true;
 }
 

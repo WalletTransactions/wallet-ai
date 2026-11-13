@@ -23,6 +23,10 @@ extern "C" {
 typedef struct pg_conn PGconn;
 }
 
+namespace pg_recover {
+class Keepalive; // util/pg_recover.hpp; полный тип нужен только db.cpp
+}
+
 namespace db {
 
 struct Row {
@@ -156,6 +160,11 @@ private:
     std::mutex mutex_;
     bool log_params_;
     std::unordered_set<std::string> mask_param_names_;
+    // true между успешным BEGIN и COMMIT/ROLLBACK: PQreset и повтор запроса
+    // запрещены (pg_recover::exec_params). Читается/пишется под mutex_.
+    bool in_transaction_ = false;
+    // Фоновая проверка соединения раз в минуту (pg_recover::Keepalive).
+    std::unique_ptr<pg_recover::Keepalive> keepalive_;
 };
 
 // Пул из N постоянных соединений — вместо ЕДИНСТВЕННОЙ Database на весь
