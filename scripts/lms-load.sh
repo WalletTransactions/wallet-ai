@@ -16,6 +16,7 @@
 #   LMS_CONTEXT      контекст, токенов             (8192 — = LLM_CONTEXT wallet-ai;
 #                    gemma-4-e4b с ним ~4,8 ГБ из 8 на GTX 1070)
 #   LMS_GPU          доля на GPU: max/off/0..1     (max)
+#   LMS_TTL          простой до авто-выгрузки, с   (3600; 0 — не выгружать)
 #   LMS_PORT         порт сервера                  (1234)
 #   LMS_BIND         адрес сервера                 (0.0.0.0 — иначе из docker не достучаться;
 #                    порт в файрволе открывать только для 172.16.0.0/12)
@@ -27,8 +28,11 @@
 # выгружается перед загрузкой: две копии на 8 ГБ не помещаются — «failed to
 # allocate buffer for kv cache».
 #
-# Модель грузится без --ttl: авто-выгрузка по простою вернула бы JIT-загрузку
-# (10–30 с) на первом запросе — дольше таймаута wallet-ai.
+# Модель грузится с --ttl (LMS_TTL, по умолчанию 3600 с): после часа простоя
+# LM Studio её выгружает и освобождает оперативную память (llama-server ~1 ГБ).
+# Цена — холодный старт: первый запрос после выгрузки идёт через JIT-загрузку
+# (10–30 с), что может превысить таймаут wallet-ai. Повторный запуск скрипта
+# загружает модель заново. LMS_TTL=0 — без авто-выгрузки.
 #
 # Демон LM Studio — то же Electron-приложение, и без дисплея (запуск по SSH)
 # оно падает с «Missing X server», а `lms` пишет только «Timed out waiting
@@ -43,6 +47,7 @@ LMS_MODEL_KEY="${LMS_MODEL_KEY:-google/gemma-4-e4b}"
 LMS_IDENTIFIER="${LMS_IDENTIFIER:-wallet-parse}"
 LMS_CONTEXT="${LMS_CONTEXT:-8192}"
 LMS_GPU="${LMS_GPU:-max}"
+LMS_TTL="${LMS_TTL:-3600}"
 LMS_PORT="${LMS_PORT:-1234}"
 LMS_BIND="${LMS_BIND:-0.0.0.0}"
 LMS_SECRETS_FILE="${LMS_SECRETS_FILE:-$HOME/.config/wallet-secrets/prod/wallet-ai.env}"
@@ -117,9 +122,11 @@ else
         echo "выгружаю $LMS_MODEL_KEY под id $other — освобождаю видеопамять"
         "$LMS_BIN" unload "$other"
     done
-    echo "загружаю $LMS_MODEL_KEY как $LMS_IDENTIFIER (контекст $LMS_CONTEXT, GPU $LMS_GPU)"
+    ttl=()
+    [[ "$LMS_TTL" != "0" ]] && ttl=(--ttl "$LMS_TTL")
+    echo "загружаю $LMS_MODEL_KEY как $LMS_IDENTIFIER (контекст $LMS_CONTEXT, GPU $LMS_GPU, TTL ${LMS_TTL}с)"
     "$LMS_BIN" load "$LMS_MODEL_KEY" --identifier "$LMS_IDENTIFIER" \
-        --context-length "$LMS_CONTEXT" --gpu "$LMS_GPU" --yes
+        --context-length "$LMS_CONTEXT" --gpu "$LMS_GPU" "${ttl[@]}" --yes
 fi
 
 # 3. Проверка. Загрузка — через `lms ps`, токен для этого не нужен.
