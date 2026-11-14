@@ -98,6 +98,7 @@ add_library(wallet_ai_core STATIC
     ${WALLET_COMMON_DIR}/util/jwt_claims.cpp
     ${WALLET_COMMON_DIR}/util/log.cpp
     ${WALLET_COMMON_DIR}/util/metrics.cpp
+    ${WALLET_COMMON_DIR}/util/pg_recover.cpp
     ${WALLET_COMMON_DIR}/util/uuid.cpp
 )
 target_include_directories(wallet_ai_core PUBLIC
