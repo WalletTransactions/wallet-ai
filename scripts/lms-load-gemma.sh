@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# Поднимает LLM для wallet-ai в LM Studio на хосте: сервер на порту, доступный
+# из docker, и модель под стабильным id (LLM_MODEL в wallet-ai/.env).
+# Идемпотентен: уже запущенный сервер и уже загруженную модель не трогает.
+#
+#   bash wallet-ai/scripts/lms-load.sh
+#   LMS_MODEL_KEY=qwen/qwen3-8b bash wallet-ai/scripts/lms-load.sh    # другая модель
+#
+# Переменные (все необязательные):
+#   LMS_BIN          путь к lms                    (~/.lmstudio/bin/lms)
+#   LMS_APP          приложение LM Studio          (/opt/LM-Studio/lm-studio)
+#   LMS_APP_LOG      вывод приложения при запуске  (~/.lmstudio/lm-studio-launch.log)
+#   LMS_DISPLAY      дисплей сессии при запуске по SSH (:0)
+#   LMS_MODEL_KEY    модель из `lms ls`            (google/gemma-4-e4b)
+#   LMS_IDENTIFIER   id в API = LLM_MODEL          (wallet-parse)
+#   LMS_CONTEXT      контекст, токенов             (8192 — = LLM_CONTEXT wallet-ai;
+#                    gemma-4-e4b с ним ~4,8 ГБ из 8 на GTX 1070)
+#   LMS_GPU          доля на GPU: max/off/0..1     (max)
+#   LMS_TTL          простой до авто-выгрузки, с   (3600; 0 — не выгружать)
+#   LMS_PORT         порт сервера                  (1234)
+#   LMS_BIND         адрес сервера                 (0.0.0.0 — иначе из docker не достучаться;
+#                    порт в файрволе открывать только для 172.16.0.0/12)
+#   LLM_API_KEY      токен LM Studio для проверки  (если не задан — из LMS_SECRETS_FILE)
+#   LMS_SECRETS_FILE файл с LLM_API_KEY            (~/.config/wallet-secrets/prod/wallet-ai.env —
+#                    тот же токен, что у wallet-ai контура)
+#
+# Та же модель, уже загруженная под другим id (например, из GUI LM Studio),
+# выгружается перед загрузкой: две копии на 8 ГБ не помещаются — «failed to
+# allocate buffer for kv cache».
+#
+# Модель грузится с --ttl (LMS_TTL, по умолчанию 3600 с): после часа простоя
+# LM Studio её выгружает и освобождает оперативную память (llama-server ~1 ГБ).
+# Цена — холодный старт: первый запрос после выгрузки идёт через JIT-загрузку
+# (10–30 с), что может превысить таймаут wallet-ai. Повторный запуск скрипта
+# загружает модель заново. LMS_TTL=0 — без авто-выгрузки.
+#
+# Демон LM Studio — то же Electron-приложение, и без дисплея (запуск по SSH)
+# оно падает с «Missing X server», а `lms` пишет только «Timed out waiting
+# for LM Studio daemon». Поэтому, если приложение не запущено, скрипт сам
+# поднимает его на дисплее графической сессии пользователя.
+set -euo pipefail
+
+LMS_BIN="${LMS_BIN:-$HOME/.lmstudio/bin/lms}"
+LMS_APP="${LMS_APP:-/opt/LM-Studio/lm-studio}"
+LMS_APP_LOG="${LMS_APP_LOG:-$HOME/.lmstudio/lm-studio-launch.log}"
+LMS_MODEL_KEY="${LMS_MODEL_KEY:-google/gemma-4-e4b}"
+LMS_IDENTIFIER="${LMS_IDENTIFIER:-wallet-parse}"
+LMS_CONTEXT="${LMS_CONTEXT:-8192}"
+LMS_GPU="${LMS_GPU:-max}"
+LMS_TTL="${LMS_TTL:-3600}"
+LMS_PORT="${LMS_PORT:-1234}"
+LMS_BIND="${LMS_BIND:-0.0.0.0}"
+LMS_SECRETS_FILE="${LMS_SECRETS_FILE:-$HOME/.config/wallet-secrets/prod/wallet-ai.env}"
+
+[[ -x "$LMS_BIN" ]] || { echo "lms не найден: $LMS_BIN (LMS_BIN=...)" >&2; exit 1; }
+command -v jq >/dev/null || { echo "нужен jq" >&2; exit 1; }
+
+# Токен — в подоболочке: остальные переменные файла сюда не попадают,
+# значение не печатается.
+if [[ -z "${LLM_API_KEY:-}" && -r "$LMS_SECRETS_FILE" ]]; then
+    LLM_API_KEY="$(set -a; source "$LMS_SECRETS_FILE" >/dev/null 2>&1; printf '%s' "${LLM_API_KEY:-}")"
+    [[ -n "$LLM_API_KEY" ]] && echo "токен LM Studio — из $LMS_SECRETS_FILE"
+fi
+
+# Окружение графической сессии пользователя для запуска из SSH: выставляет
+# и экспортирует DISPLAY / XAUTHORITY / WAYLAND_DISPLAY (и DBUS_SESSION_BUS_ADDRESS).
+# Возвращает 1, если сессии нет (никто не вошёл на рабочий стол).
+session_display_env() {
+    local rt="/run/user/$(id -u)" auth
+    # GNOME/mutter: XWayland-авторизация с новым суффиксом на каждый вход —
+    # берём самую свежую. `|| true`: без совпадений ls падает, а pipefail+set -e
+    # уронили бы весь скрипт вместо return 1.
+    auth="$(ls -t "$rt"/.mutter-Xwaylandauth.* 2>/dev/null | head -n 1 || true)"
+    # Чистый X11 без Wayland.
+    [[ -z "$auth" && -r "$HOME/.Xauthority" ]] && auth="$HOME/.Xauthority"
+    [[ -n "$auth" ]] || return 1
+    # Номера дисплея в файле mutter нет (запись на любой дисплей) — :0 по умолчанию.
+    export DISPLAY="${LMS_DISPLAY:-:0}" XAUTHORITY="$auth"
+    [[ -S "$rt/wayland-0" ]] && export WAYLAND_DISPLAY=wayland-0
+    [[ -S "$rt/bus" && -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]] \
+        && export DBUS_SESSION_BUS_ADDRESS="unix:path=$rt/bus"
+    return 0
+}
+
+# 0. Приложение. Уже запущено (GUI или сервис) — `lms` подключится сам.
+if ! pgrep -f "^$LMS_APP" >/dev/null; then
+    [[ -x "$LMS_APP" ]] || { echo "LM Studio не найдена: $LMS_APP (LMS_APP=...)" >&2; exit 1; }
+    if [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] && ! session_display_env; then
+        echo "LM Studio не запущена, а дисплея нет: войди в графическую сессию на хосте" \
+             "или запусти LM Studio там вручную, затем повтори" >&2
+        exit 1
+    fi
+    echo "запускаю LM Studio на дисплее ${DISPLAY:-wayland:$WAYLAND_DISPLAY} (лог: $LMS_APP_LOG)"
+    setsid nohup "$LMS_APP" >"$LMS_APP_LOG" 2>&1 </dev/null &
+    # Без дисплея или с чужим XAUTHORITY приложение выходит за секунду-две.
+    for _ in 1 2 3 4 5; do
+        sleep 1
+        pgrep -f "^$LMS_APP" >/dev/null && continue
+        echo "LM Studio завершилась при запуске:" >&2
+        tail -n 5 "$LMS_APP_LOG" >&2
+        exit 1
+    done
+fi
+
+# 1. Сервер. Первый вызов после запуска приложения может занять до минуты.
+if "$LMS_BIN" server status --json 2>/dev/null | grep -q '"running":true'; then
+    echo "сервер уже запущен"
+else
+    echo "запускаю сервер на $LMS_BIND:$LMS_PORT"
+    "$LMS_BIN" server start --port "$LMS_PORT" --bind "$LMS_BIND"
+fi
+
+# 2. Модель под нужным id.
+loaded="$("$LMS_BIN" ps --json 2>/dev/null || echo '[]')"
+if jq -e --arg id "$LMS_IDENTIFIER" 'any(.[]; .identifier == $id)' <<<"$loaded" >/dev/null; then
+    echo "модель $LMS_IDENTIFIER уже загружена"
+else
+    # Та же модель под чужим id занимает видеопамять — вторая копия не влезет.
+    jq -r --arg key "$LMS_MODEL_KEY" --arg id "$LMS_IDENTIFIER" \
+        '.[] | select(.modelKey == $key and .identifier != $id) | .identifier' <<<"$loaded" \
+    | while read -r other; do
+        echo "выгружаю $LMS_MODEL_KEY под id $other — освобождаю видеопамять"
+        "$LMS_BIN" unload "$other"
+    done
+    ttl=()
+    [[ "$LMS_TTL" != "0" ]] && ttl=(--ttl "$LMS_TTL")
+    echo "загружаю $LMS_MODEL_KEY как $LMS_IDENTIFIER (контекст $LMS_CONTEXT, GPU $LMS_GPU, TTL ${LMS_TTL}с)"
+    "$LMS_BIN" load "$LMS_MODEL_KEY" --identifier "$LMS_IDENTIFIER" \
+        --context-length "$LMS_CONTEXT" --gpu "$LMS_GPU" "${ttl[@]}" --yes
+fi
+
+# 3. Проверка. Загрузка — через `lms ps`, токен для этого не нужен.
+"$LMS_BIN" ps --json 2>/dev/null \
+    | jq -e --arg id "$LMS_IDENTIFIER" 'any(.[]; .identifier == $id)' >/dev/null \
+    || { echo "lms ps не показывает $LMS_IDENTIFIER — модель не загрузилась" >&2; exit 1; }
+
+#    Затем тот же запрос, что проба wallet-ai (GET /v1/models): слушает ли
+#    сервер порт и подходит ли токен контура. LLM_API_KEY — из окружения или
+#    LMS_SECRETS_FILE (см. шапку). Без токена при включённой авторизации
+#    LM Studio (401) — только предупреждение: модель загружена, токен не проверен.
+auth=()
+[[ -n "${LLM_API_KEY:-}" ]] && auth=(-H "Authorization: Bearer $LLM_API_KEY")
+resp="$(curl -sS -m 10 -w '\n%{http_code}' "${auth[@]}" \
+    "http://127.0.0.1:$LMS_PORT/v1/models" 2>/dev/null || true)"
+code="${resp##*$'\n'}"
+body="${resp%$'\n'*}"
+if [[ "$code" == "200" ]] && grep -q "\"$LMS_IDENTIFIER\"" <<<"$body"; then
+    echo "ok: $LMS_IDENTIFIER доступна на :$LMS_PORT"
+elif [[ "$code" == "401" && -z "${LLM_API_KEY:-}" ]]; then
+    echo "ok: $LMS_IDENTIFIER загружена; токен LM Studio не проверен — нет LLM_API_KEY (LMS_SECRETS_FILE=...)" >&2
+elif [[ "$code" == "401" ]]; then
+    echo "LM Studio отвергла токен (401) — LLM_API_KEY не тот, что в настройках сервера" >&2
+    exit 1
+else
+    echo "GET /v1/models на :$LMS_PORT: HTTP ${code:-нет ответа}, $LMS_IDENTIFIER не найдена" >&2
+    exit 1
+fi
