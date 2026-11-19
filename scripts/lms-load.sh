@@ -3,18 +3,23 @@
 # из docker, и модель под стабильным id (LLM_MODEL в wallet-ai/.env).
 # Идемпотентен: уже запущенный сервер и уже загруженную модель не трогает.
 #
-#   bash wallet-ai/scripts/lms-load.sh
-#   LMS_MODEL_KEY=qwen/qwen3-8b bash wallet-ai/scripts/lms-load.sh    # другая модель
+#   bash wallet-ai/scripts/lms-load.sh                # qwen/qwen3-8b (с 2026-11-19)
+#   bash wallet-ai/scripts/lms-load-gemma.sh          # прежний скрипт: gemma-4-e4b
+#   LMS_MODEL_KEY=<ключ из lms ls> bash wallet-ai/scripts/lms-load.sh    # другая модель
+#
+# Почему Qwen3-8B (2026-11-19, test): gemma-4-e4b не вызывала ledger_overview и
+# переспрашивала период, Qwen3-8B вызывает инструменты сама; в Telegram-чате
+# отвечает за 15–20 с при дедлайне 120 с.
 #
 # Переменные (все необязательные):
 #   LMS_BIN          путь к lms                    (~/.lmstudio/bin/lms)
 #   LMS_APP          приложение LM Studio          (/opt/LM-Studio/lm-studio)
 #   LMS_APP_LOG      вывод приложения при запуске  (~/.lmstudio/lm-studio-launch.log)
 #   LMS_DISPLAY      дисплей сессии при запуске по SSH (:0)
-#   LMS_MODEL_KEY    модель из `lms ls`            (google/gemma-4-e4b)
+#   LMS_MODEL_KEY    модель из `lms ls`            (qwen/qwen3-8b)
 #   LMS_IDENTIFIER   id в API = LLM_MODEL          (wallet-parse)
 #   LMS_CONTEXT      контекст, токенов             (8192 — = LLM_CONTEXT wallet-ai;
-#                    gemma-4-e4b с ним ~4,8 ГБ из 8 на GTX 1070)
+#                    qwen3-8b с ним ~4,7 ГБ из 8 на GTX 1070)
 #   LMS_GPU          доля на GPU: max/off/0..1     (max)
 #   LMS_TTL          простой до авто-выгрузки, с   (3600; 0 — не выгружать)
 #   LMS_PORT         порт сервера                  (1234)
@@ -43,7 +48,7 @@ set -euo pipefail
 LMS_BIN="${LMS_BIN:-$HOME/.lmstudio/bin/lms}"
 LMS_APP="${LMS_APP:-/opt/LM-Studio/lm-studio}"
 LMS_APP_LOG="${LMS_APP_LOG:-$HOME/.lmstudio/lm-studio-launch.log}"
-LMS_MODEL_KEY="${LMS_MODEL_KEY:-google/gemma-4-e4b}"
+LMS_MODEL_KEY="${LMS_MODEL_KEY:-qwen/qwen3-8b}"
 LMS_IDENTIFIER="${LMS_IDENTIFIER:-wallet-parse}"
 LMS_CONTEXT="${LMS_CONTEXT:-8192}"
 LMS_GPU="${LMS_GPU:-max}"
@@ -112,6 +117,15 @@ fi
 
 # 2. Модель под нужным id.
 loaded="$("$LMS_BIN" ps --json 2>/dev/null || echo '[]')"
+# Тот же id, но другая модель (например, gemma после смены умолчания): id
+# сам по себе не значит «нужная модель» — выгружаем и грузим заново, иначе
+# скрипт молча оставил бы старую модель.
+if jq -e --arg id "$LMS_IDENTIFIER" --arg key "$LMS_MODEL_KEY" \
+    'any(.[]; .identifier == $id and .modelKey != $key)' <<<"$loaded" >/dev/null; then
+    echo "под id $LMS_IDENTIFIER загружена другая модель — выгружаю, загружу $LMS_MODEL_KEY"
+    "$LMS_BIN" unload "$LMS_IDENTIFIER"
+    loaded="$("$LMS_BIN" ps --json 2>/dev/null || echo '[]')"
+fi
 if jq -e --arg id "$LMS_IDENTIFIER" 'any(.[]; .identifier == $id)' <<<"$loaded" >/dev/null; then
     echo "модель $LMS_IDENTIFIER уже загружена"
 else
