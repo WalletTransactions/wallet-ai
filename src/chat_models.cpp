@@ -1,5 +1,6 @@
 #include "chat_models.hpp"
 
+#include "chat_stream.hpp"
 #include "httplib.h"
 #include "llm_client.hpp"
 #include "llm_probe.hpp"
@@ -192,7 +193,66 @@ Turn parse_openai_response(int http_status, const std::string& body) {
     return t;
 }
 
+json openai_stream_request_body(const OpenAiConfig& cfg, const std::string& system,
+                                const std::vector<Message>& messages, const std::vector<mcp::Tool>& tools,
+                                bool allow_tools) {
+    json body = openai_request_body(cfg, system, messages, tools, allow_tools);
+    body["stream"] = true;
+    body["stream_options"] = {{"include_usage", true}}; // расход токенов приходит последним кадром
+    return body;
+}
+
 namespace {
+
+// POST с потоковым чтением ответа, общий для обоих провайдеров. 2xx с
+// text/event-stream уходит в feed по кускам; остальное (ошибки, сервер,
+// проигнорировавший stream) копится в body и разбирается обычным parse_*.
+struct StreamPost {
+    httplib::Result res;
+    int status = 0;
+    bool buffered = false; // тело накоплено в body, а не отдано в feed
+    bool stopped = false;  // sink.should_stop оборвал чтение
+    std::string body;
+};
+
+StreamPost post_stream(httplib::Client& cli, const std::string& path, const httplib::Headers& headers,
+                       const std::string& request_body, const StreamSink& sink,
+                       const std::function<void(const char*, std::size_t)>& feed) {
+    StreamPost out;
+    httplib::Request req;
+    req.method = "POST";
+    req.path = path;
+    req.headers = headers;
+    req.headers.emplace("Content-Type", "application/json");
+    req.body = request_body;
+    req.response_handler = [&](const httplib::Response& r) {
+        out.status = r.status;
+        bool sse = r.get_header_value("Content-Type").rfind("text/event-stream", 0) == 0;
+        out.buffered = !(r.status >= 200 && r.status < 300 && sse);
+        return true;
+    };
+    req.content_receiver = [&](const char* data, std::size_t len, std::uint64_t, std::uint64_t) {
+        if (sink.should_stop && sink.should_stop()) {
+            out.stopped = true;
+            return false;
+        }
+        if (!out.buffered) {
+            feed(data, len);
+        } else if (out.body.size() < (1u << 20)) {
+            out.body.append(data, len);
+        }
+        return true;
+    };
+    out.res = cli.send(req);
+    return out;
+}
+
+// Ответ без потока (ошибка или сервер без stream): как у обычного turn(), весь
+// текст — одним куском.
+Turn finish_buffered(Turn t, const StreamSink& sink) {
+    if (t.kind != TurnKind::Error && !t.message.text.empty() && sink.on_delta) sink.on_delta(t.message.text);
+    return t;
+}
 
 class OpenAiChatModel final : public Model {
 public:
@@ -210,6 +270,30 @@ public:
                             openai_request_body(cfg_, system, messages, tools, allow_tools).dump(), "application/json");
         if (!res) return network_error(res.error());
         return parse_openai_response(res->status, res->body);
+    }
+
+    Turn turn_stream(const std::string& system, const std::vector<Message>& messages,
+                     const std::vector<mcp::Tool>& tools, bool allow_tools, const std::optional<Credential>& credential,
+                     int timeout_ms, const StreamSink& sink) override {
+        if (cfg_.url.empty() || base_.origin.empty()) return error_turn(ModelError::Unavailable, "llm_disabled");
+        if (timeout_ms <= 0) return error_turn(ModelError::Timeout, "deadline");
+        httplib::Client cli(base_.origin);
+        set_timeouts(cli, timeout_ms); // timeout_ms — остаток дедлайна задания: он же потолок всего потока
+        httplib::Headers headers;
+        if (credential && !credential->secret.empty()) headers.emplace("Authorization", "Bearer " + credential->secret);
+        OpenAiStreamAssembler assembler(sink.on_delta);
+        SseParser sse;
+        auto post = post_stream(cli, base_.path + "/chat/completions", headers,
+                                openai_stream_request_body(cfg_, system, messages, tools, allow_tools).dump(), sink,
+                                [&](const char* d, std::size_t n) {
+                                    sse.feed(d, n, [&](const std::string& data) { assembler.on_data(data); });
+                                });
+        if (post.stopped) return error_turn(ModelError::Unavailable, "cancelled");
+        if (!post.res) return network_error(post.res.error());
+        if (post.buffered) return finish_buffered(parse_openai_response(post.status, post.body), sink);
+        if (assembler.bad()) return error_turn(ModelError::Unavailable, "stream_error");
+        if (!assembler.complete()) return error_turn(ModelError::Unavailable, "stream_cut"); // оборван посреди ответа
+        return parse_openai_response(post.status, assembler.response_body());
     }
 
 private:
@@ -376,6 +460,14 @@ Turn parse_anthropic_response(int http_status, const std::string& body) {
     return t;
 }
 
+json anthropic_stream_request_body(const AnthropicConfig& cfg, const std::string& system,
+                                   const std::vector<Message>& messages, const std::vector<mcp::Tool>& tools,
+                                   bool allow_tools) {
+    json body = anthropic_request_body(cfg, system, messages, tools, allow_tools);
+    body["stream"] = true;
+    return body;
+}
+
 namespace {
 
 class AnthropicChatModel final : public Model {
@@ -399,6 +491,32 @@ public:
                             "application/json");
         if (!res) return network_error(res.error());
         return parse_anthropic_response(res->status, res->body);
+    }
+
+    Turn turn_stream(const std::string& system, const std::vector<Message>& messages,
+                     const std::vector<mcp::Tool>& tools, bool allow_tools, const std::optional<Credential>& credential,
+                     int timeout_ms, const StreamSink& sink) override {
+        if (!credential || credential->secret.empty()) return error_turn(ModelError::Unavailable, "no_credential");
+        if (timeout_ms <= 0) return error_turn(ModelError::Timeout, "deadline");
+        httplib::Client cli(cfg_.base_url);
+        set_timeouts(cli, timeout_ms);
+        httplib::Headers headers;
+        for (const auto& [k, v] : anthropic_headers(cfg_, *credential)) {
+            if (k != "content-type") headers.emplace(k, v);
+        }
+        AnthropicStreamAssembler assembler(sink.on_delta);
+        SseParser sse;
+        auto post = post_stream(cli, "/v1/messages", headers,
+                                anthropic_stream_request_body(cfg_, system, messages, tools, allow_tools).dump(), sink,
+                                [&](const char* d, std::size_t n) {
+                                    sse.feed(d, n, [&](const std::string& data) { assembler.on_data(data); });
+                                });
+        if (post.stopped) return error_turn(ModelError::Unavailable, "cancelled");
+        if (!post.res) return network_error(post.res.error());
+        if (post.buffered) return finish_buffered(parse_anthropic_response(post.status, post.body), sink);
+        if (assembler.bad()) return error_turn(ModelError::Unavailable, "stream_error");
+        if (!assembler.complete()) return error_turn(ModelError::Unavailable, "stream_cut");
+        return parse_anthropic_response(post.status, assembler.response_body());
     }
 
 private:

@@ -106,6 +106,22 @@ curl "$GW/api/ai/jobs/$ID?wait=25" -H "Authorization: Bearer $T"
   timeout`. Инструмента нет в `tools/list` или аргументы не JSON — модели
   возвращается ошибка инструмента, в wallet-mcp ничего не уходит.
   Результат инструмента длиннее `AI_CHAT_TOOL_RESULT_MAX_CHARS` обрезается.
+- **Поток событий** (`GET /api/ai/jobs/{id}/events`, change
+  `chat-sse-events`). Ответ chat можно читать по мере генерации: SSE-кадры
+  `delta` (кусок текста), `tool` (имя инструмента и исход), `done` (тот же
+  `result`, что у `GET /api/ai/jobs/{id}`), `error`. Провайдеры читаются
+  потоком (`stream:true`, разбор в `src/chat_stream.cpp`), итог шага собирается
+  тем же `parse_*_response`, что и без потока. Журнал событий — в памяти
+  `jobs::Store`, живёт TTL задания; обрыв клиента задание не отменяет,
+  переподключение — заголовком `Last-Event-ID`. Включается `AI_STREAM_ENABLED`
+  (по умолчанию выкл.): во внешний трафик — только когда wallet-gateway
+  проксирует поток без буфера. Проверка напрямую:
+
+  ```sh
+  curl -N -H "Authorization: Bearer $JWT" -H "Last-Event-ID: 0" \
+       http://localhost:8087/api/ai/jobs/$JOB_ID/events
+  ```
+
 - **Отказы:** `tools_unavailable` (wallet-mcp лежит или 503), `auth_expired`
   (wallet-mcp ответил 401), `provider_auth_failed` (провайдер отклонил ключ,
   в журнале — `provider` и `owner`), `provider_refused` (модель отказалась),
@@ -257,6 +273,11 @@ Access-токен google-auth (Bearer или cookie `session`), подпись �
 | `ANTHROPIC_EFFORT` | `low` | `output_config.effort` (`low` … `max`) |
 | `ANTHROPIC_FALLBACKS` | вкл. | `off` — без серверного fallback при отказе модели |
 | `AI_JOB_TIMEOUT_SECS_CHAT` | `120` | дедлайн всего задания `chat` |
+| `AI_STREAM_ENABLED` | `false` | `GET /api/ai/jobs/{id}/events` (SSE хода chat); выкл. — 404. Включать после того, как гейтвей умеет проксировать поток |
+| `AI_STREAM_MAX` | `20` | одновременно открытых потоков (пул потоков httplib растёт на столько же); сверх — 429 `busy` |
+| `AI_STREAM_MAX_PER_USER` | `3` | то же на пользователя |
+| `AI_STREAM_MAX_EVENTS` | `2000` | потолок журнала событий задания: текст сверх него копится и выходит одним `delta` перед `done` |
+| `AI_STREAM_PING_SECS` | `15` | пульс `: ping` в молчащем потоке |
 | `AI_CHAT_MAX_STEPS` | `5` | вызовов модели с инструментами; затем один без них |
 | `AI_CHAT_HISTORY_TURNS` / `AI_CHAT_HISTORY_TTL_SECS` | `6` / `1800` | пар «вопрос — ответ» в диалоге и их срок от последнего обращения |
 | `AI_CHAT_TOOL_RESULT_MAX_CHARS` | `6000` | результат инструмента длиннее обрезается («…(обрезано)») |

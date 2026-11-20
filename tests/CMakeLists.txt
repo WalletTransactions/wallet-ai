@@ -12,6 +12,8 @@ add_executable(wallet_ai_tests
     test_mcp_client.cpp
     test_providers.cpp
     test_chat_models.cpp
+    test_chat_stream.cpp
+    test_stream_events.cpp
     test_chat.cpp
 )
 target_include_directories(wallet_ai_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

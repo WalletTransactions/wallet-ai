@@ -156,7 +156,7 @@ std::size_t Conversations::size() const {
 
 // --- Цикл ---
 
-parse_expense::Outcome run(const jobs::Job& job, Agent& agent) {
+parse_expense::Outcome run(const jobs::Job& job, Agent& agent, const Hooks& hooks) {
     using Clock = std::chrono::steady_clock;
     const Clock::time_point deadline = agent.now() + std::chrono::milliseconds(agent.cfg.timeout_ms);
     auto remaining_ms = [&]() -> int {
@@ -214,12 +214,19 @@ parse_expense::Outcome run(const jobs::Job& job, Agent& agent) {
     // Текст пользователя — только в последнем сообщении user.
     messages.push_back({Role::User, question, {}, {}, nullptr});
 
+    auto publish = [&](const char* type, json data) {
+        if (hooks.publish) hooks.publish(type, data);
+    };
+    StreamSink sink;
+    sink.on_delta = [&](const std::string& text) { publish("delta", {{"text", text}}); };
+    sink.should_stop = [&] { return hooks.cancelled && hooks.cancelled(); };
+
     const int max_steps = std::max(1, agent.cfg.max_steps);
     for (;;) {
         const bool allow_tools = steps < max_steps;
         if (remaining_ms() <= 0) return finish(failed(out, "timeout", "deadline"));
         auto credential = agent.credentials->resolve(job.user_id, provider);
-        Turn turn = model->turn(system, messages, listed.tools, allow_tools, credential, remaining_ms());
+        Turn turn = model->turn_stream(system, messages, listed.tools, allow_tools, credential, remaining_ms(), sink);
         ++steps;
         total.input_tokens += turn.usage.input_tokens;
         total.output_tokens += turn.usage.output_tokens;
@@ -292,10 +299,12 @@ parse_expense::Outcome run(const jobs::Job& job, Agent& agent) {
                 r.content = "Нет такого инструмента: " + call.name + ". Доступны только инструменты из списка.";
                 r.is_error = true;
                 count_tool("unknown", "unknown_tool");
+                publish("tool", {{"name", "unknown"}, {"outcome", "error"}});
             } else if (!call.args_ok) {
                 r.content = "Аргументы вызова " + call.name + " — не JSON-объект. Повтори вызов с аргументами по схеме.";
                 r.is_error = true;
                 count_tool(call.name, "bad_args");
+                publish("tool", {{"name", call.name}, {"outcome", "error"}});
             } else {
                 if (remaining_ms() <= 0) return finish(failed(out, "timeout", "deadline"));
                 mcp::CallResult c =
@@ -305,11 +314,13 @@ parse_expense::Outcome run(const jobs::Job& job, Agent& agent) {
                     r.content = c.content;
                     r.is_error = c.is_error;
                     count_tool(call.name, c.is_error ? "error" : "ok");
+                    publish("tool", {{"name", call.name}, {"outcome", c.is_error ? "error" : "ok"}});
                 } else if (c.status == mcp::Status::RpcError) {
                     // Ошибка протокола у одного вызова — модели, цикл продолжается.
                     r.content = c.message.empty() ? "Ошибка инструмента." : c.message;
                     r.is_error = true;
                     count_tool(call.name, "rpc_error");
+                    publish("tool", {{"name", call.name}, {"outcome", "error"}});
                 } else {
                     count_tool(call.name, mcp::to_string(c.status));
                     return finish(failed(out, mcp::failure_code(c.status), c.detail));

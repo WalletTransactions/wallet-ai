@@ -262,6 +262,67 @@ paths:
           description: Нет, истекло, чужое или уже завершено
           content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
 
+  /api/ai/jobs/{id}/events:
+    parameters:
+      - {in: path, name: id, required: true, schema: {type: string, format: uuid}}
+    get:
+      operationId: jobEvents
+      summary: Поток событий задания chat (SSE)
+      description: |
+        Ход задания `chat` потоком `text/event-stream`: ответ модели по мере
+        генерации и вызовы инструментов. Итог по-прежнему в
+        `GET /api/ai/jobs/{id}`; клиент без SSE пользуется long-poll'ом.
+        Только для заданий `chat`; включается `AI_STREAM_ENABLED`, иначе 404.
+
+        Кадр: `id: N`, `event: <вид>`, `data: <json>`. Виды:
+        - `delta` — `{"text": "..."}`, очередной кусок текста. Куски одного
+          шага склеиваются в блок; блок закрывается событием `tool` или `done`
+          (шаг, закончившийся вызовом инструмента, может содержать черновой
+          текст — клиент вправе его не показывать после `tool`).
+        - `tool` — `{"name": "...", "outcome": "ok|error"}`: вызов
+          инструмента wallet-mcp (без аргументов и результата; выдуманное
+          моделью имя заменено на `unknown`).
+        - `done` — `result` задания (`ChatResult`), поток закрывается.
+        - `error` — `{"failure": "..."}` (`unavailable`, `timeout`,
+          `cancelled`, ...), поток закрывается.
+
+        `id` растёт в пределах задания. Обрыв соединения задание не отменяет:
+        переподключение с `Last-Event-ID: N` продолжает с события `N+1` без
+        пропусков и повторов; журнал хранится до конца TTL задания. Молчащий
+        поток получает комментарий `: ping` раз в `AI_STREAM_PING_SECS`
+        (15 с). Для `fetch` с заголовком Authorization (`EventSource` его не
+        умеет).
+      tags: [ai]
+      parameters:
+        - in: header
+          name: Last-Event-ID
+          schema: {type: integer, minimum: 0}
+          description: id последнего полученного события
+      responses:
+        "200":
+          description: Поток событий
+          content:
+            text/event-stream:
+              schema: {type: string}
+              example: |
+                id: 1
+                event: tool
+                data: {"name":"spending_by_category","outcome":"ok"}
+
+                id: 2
+                event: delta
+                data: {"text":"На няню ушло 42 000 RUB."}
+
+                id: 3
+                event: done
+                data: {"text":"На няню ушло 42 000 RUB.","conversation_id":"tg-42-1","provider":"lmstudio","steps":2,"tools":["spending_by_category"]}
+        "404":
+          description: Нет, истекло, чужое, не `chat` или поток выключен
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "429":
+          description: Слишком много открытых потоков (`AI_STREAM_MAX`, `AI_STREAM_MAX_PER_USER`), `{"error":"busy"}`
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+
   /api/ai/imports:
     post:
       operationId: createImport

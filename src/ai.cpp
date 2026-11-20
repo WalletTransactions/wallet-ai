@@ -163,6 +163,20 @@ void handle_get(AppState& state, const httplib::Request& req, httplib::Response&
     reply(res, 200, job_json(*job));
 }
 
+// Last-Event-ID: id последнего полученного события; мусор — с начала.
+std::size_t parse_last_event_id(const httplib::Request& req) {
+    std::string v = req.get_header_value("Last-Event-ID");
+    if (v.empty() || v.size() > 12 || v.find_first_not_of("0123456789") != std::string::npos) return 0;
+    return static_cast<std::size_t>(std::stoull(v));
+}
+
+void handle_events(AppState& state, const httplib::Request& req, httplib::Response& res) {
+    applog::set_route("GET /api/ai/jobs/:id/events");
+    auto user = session::current_user(req, *state.jwks);
+    if (!user) return reply_unauthenticated(res);
+    stream_events(state, req.matches[1], user->user_id, parse_last_event_id(req), res);
+}
+
 void handle_cancel(AppState& state, const httplib::Request& req, httplib::Response& res) {
     applog::set_route("DELETE /api/ai/jobs/:id");
     auto user = session::current_user(req, *state.jwks);
@@ -188,6 +202,71 @@ json status_json(const llm::Config& cfg, llm::ProbeResult status, bool statement
     if (enabled && statement_import) j["features"].push_back("statement_import");
     if (enabled && chat) j["features"].push_back(chat::kKind);
     return j;
+}
+
+void stream_events(AppState& state, const std::string& job_id, const std::string& user_id, std::size_t after,
+                   httplib::Response& res) {
+    if (!state.stream_enabled || !state.streams || !state.jobs->can_stream(job_id, user_id)) {
+        return reply(res, 404, {{"error", "задания нет, оно истекло или это не chat"}});
+    }
+    if (!state.streams->try_acquire(user_id)) {
+        metrics::inc_counter("ai_stream_total", "Потоки событий по исходу.", "outcome", "busy");
+        return reply(res, 429, {{"error", "busy"}});
+    }
+    metrics::set_gauge("ai_streams_open", "Открытых потоков событий.", state.streams->open());
+
+    struct Progress {
+        std::size_t next;
+        std::size_t sent = 0;
+        const char* outcome = "client_gone";
+        std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+    };
+    auto progress = std::make_shared<Progress>();
+    progress->next = after;
+
+    res.set_header("Cache-Control", "no-cache");
+    res.set_header("X-Accel-Buffering", "no"); // nginx/прокси не буферизуют поток
+    res.set_chunked_content_provider(
+        "text/event-stream",
+        [&state, job_id, user_id, progress](std::size_t, httplib::DataSink& sink) {
+            auto page = state.jobs->read_events(job_id, user_id, progress->next, state.stream_ping);
+            if (!page) { // задание истекло по TTL
+                progress->outcome = "expired";
+                sink.done();
+                return true;
+            }
+            std::string out;
+            if (page->events.empty() && !page->finished) out = ": ping\n\n";
+            for (const auto& e : page->events) {
+                out += "id: " + std::to_string(e.id) + "\nevent: " + e.type + "\ndata: " + e.data.dump() + "\n\n";
+                progress->next = e.id;
+                ++progress->sent;
+            }
+            if (!out.empty() && !sink.write(out.data(), out.size())) return false; // клиент ушёл
+            if (page->finished) {
+                progress->outcome = "finished";
+                sink.done();
+            } else if (page->events.empty() && state.jobs->is_stopped()) {
+                progress->outcome = "shutdown";
+                sink.done();
+            }
+            return true;
+        },
+        [&state, user_id, job_id, progress](bool) {
+            state.streams->release(user_id);
+            metrics::set_gauge("ai_streams_open", "Открытых потоков событий.", state.streams->open());
+            metrics::inc_counter("ai_stream_total", "Потоки событий по исходу.", "outcome", progress->outcome);
+            // Без текста событий: только счётчики и исход (приватность чата).
+            applog::info("ai stream closed",
+                         {{"event", "stream_closed"},
+                          {"job_id", job_id},
+                          {"user_id", user_id},
+                          {"events", progress->sent},
+                          {"duration_ms", std::chrono::duration_cast<std::chrono::milliseconds>(
+                                              std::chrono::steady_clock::now() - progress->started)
+                                              .count()},
+                          {"outcome", progress->outcome}});
+        });
 }
 
 providers::SettingsRepo* settings_repo(AppState& state) {
@@ -278,7 +357,14 @@ parse_expense::Outcome run_job(AppState& state, const jobs::Job& job) {
     if (job.kind == parse_expense::kKind) {
         return parse_expense::run(job.input, *state.llm_client, state.parse_expense_opts);
     }
-    if (job.kind == chat::kKind && state.chat_agent) return chat::run(job, *state.chat_agent);
+    if (job.kind == chat::kKind && state.chat_agent) {
+        chat::Hooks hooks;
+        hooks.publish = [&state, id = job.id](const std::string& type, const nlohmann::json& data) {
+            state.jobs->append_event(id, type, data);
+        };
+        hooks.cancelled = [&state, id = job.id] { return state.jobs->cancel_requested(id); };
+        return chat::run(job, *state.chat_agent, hooks);
+    }
     auto handler = state.job_handlers.find(job.kind);
     if (handler != state.job_handlers.end()) return handler->second(job);
     // Неизвестный вид — без вызова LLM.
@@ -300,6 +386,8 @@ void register_routes(httplib::Server& svr, AppState& state) {
             [&state](const httplib::Request& req, httplib::Response& res) { handle_settings_put(state, req, res); });
     svr.Get(R"(/api/ai/jobs/([0-9a-fA-F-]{36}))",
             [&state](const httplib::Request& req, httplib::Response& res) { handle_get(state, req, res); });
+    svr.Get(R"(/api/ai/jobs/([0-9a-fA-F-]{36})/events)",
+            [&state](const httplib::Request& req, httplib::Response& res) { handle_events(state, req, res); });
     svr.Delete(R"(/api/ai/jobs/([0-9a-fA-F-]{36}))",
                [&state](const httplib::Request& req, httplib::Response& res) { handle_cancel(state, req, res); });
 }

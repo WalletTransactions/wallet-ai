@@ -66,6 +66,7 @@ add_library(wallet_ai_core STATIC
     src/chat.cpp
     src/chat_metrics.cpp
     src/chat_models.cpp
+    src/chat_stream.cpp
     src/db.cpp
     src/expense_check.cpp
     src/import_runner.cpp

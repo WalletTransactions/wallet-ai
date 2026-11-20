@@ -1,5 +1,7 @@
 #include "jobs.hpp"
 
+#include <algorithm>
+
 #include "util/uuid.hpp"
 
 namespace jobs {
@@ -158,6 +160,7 @@ bool Store::cancel(const std::string& id, const std::string& user_id) {
     job.status = Status::Cancelled;
     job.finished = now_();
     job.input = nullptr;
+    if (job.kind == "chat") append_locked(id, "error", {{"failure", "cancelled"}});
     change_cv_.notify_all();
     return true;
 }
@@ -190,7 +193,101 @@ void Store::complete(const std::string& id, Status status, nlohmann::json result
     job.status = status;
     job.result = std::move(result);
     job.failure = failure;
+    if (job.kind == "chat") {
+        if (status == Status::Done) {
+            append_locked(id, "done", job.result);
+        } else {
+            append_locked(id, "error", {{"failure", failure}});
+        }
+    }
     change_cv_.notify_all();
+}
+
+bool Store::append_locked(const std::string& id, const std::string& type, nlohmann::json data) {
+    EventLog& log = events_[id];
+    if (log.closed) return false;
+    const bool terminal = type == "done" || type == "error";
+    if (type == "delta") {
+        std::string text = data.value("text", std::string());
+        if (text.empty()) return true;
+        if (!log.tail.empty()) { // за потолком: копим в хвосте
+            log.tail += text;
+            return true;
+        }
+        if (!log.events.empty() && log.events.back().type == "delta" && log.events.back().id > log.delivered) {
+            // Последний delta читатель ещё не видел — можно дописать, id не меняется.
+            Event& last = log.events.back();
+            last.data["text"] = last.data.value("text", std::string()) + text;
+            change_cv_.notify_all();
+            return true;
+        }
+        if (log.events.size() >= limits_.max_events) {
+            log.tail = std::move(text);
+            return true;
+        }
+        data = {{"text", text}};
+    } else if (!log.tail.empty()) {
+        // tool/done/error: накопленный хвост выходит раньше, порядок сохраняется.
+        log.events.push_back({log.events.size() + 1, "delta", {{"text", std::move(log.tail)}}});
+        log.tail.clear();
+    }
+    log.events.push_back({log.events.size() + 1, type, std::move(data)});
+    if (terminal) log.closed = true;
+    change_cv_.notify_all();
+    return true;
+}
+
+bool Store::can_stream(const std::string& id, const std::string& user_id) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = jobs_.find(id);
+    return it != jobs_.end() && it->second.user_id == user_id && it->second.kind == "chat";
+}
+
+bool Store::is_stopped() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return stopped_;
+}
+
+bool Store::cancel_requested(const std::string& id) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = jobs_.find(id);
+    return it != jobs_.end() && it->second.cancel_requested;
+}
+
+bool Store::append_event(const std::string& id, const std::string& type, nlohmann::json data) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = jobs_.find(id);
+    if (it == jobs_.end() || it->second.kind != "chat" || is_final(it->second.status)) return false;
+    return append_locked(id, type, std::move(data));
+}
+
+std::optional<EventPage> Store::read_events(const std::string& id, const std::string& user_id, std::size_t after,
+                                            std::chrono::milliseconds wait) {
+    std::unique_lock<std::mutex> lock(mu_);
+    auto job = jobs_.find(id);
+    if (job == jobs_.end() || job->second.user_id != user_id || job->second.kind != "chat") return std::nullopt;
+    auto has_news = [&] {
+        auto log = events_.find(id);
+        return log != events_.end() && (log->second.events.size() > after || log->second.closed);
+    };
+    if (wait.count() > 0 && !stopped_ && !has_news()) {
+        change_cv_.wait_for(lock, wait, [&] { return stopped_ || jobs_.find(id) == jobs_.end() || has_news(); });
+    }
+    job = jobs_.find(id);
+    if (job == jobs_.end()) return std::nullopt;
+    EventPage page;
+    auto log = events_.find(id);
+    if (log == events_.end()) {
+        page.finished = is_final(job->second.status); // журнала нет: задание завершилось без событий
+        return page;
+    }
+    EventLog& l = log->second;
+    if (after < l.events.size()) {
+        page.events.assign(l.events.begin() + static_cast<std::ptrdiff_t>(after), l.events.end());
+        l.delivered = std::max(l.delivered, l.events.back().id);
+    }
+    page.finished = l.closed && after + page.events.size() >= l.events.size();
+    return page;
 }
 
 void Store::sweep() {
@@ -200,6 +297,7 @@ void Store::sweep() {
         const Job& job = it->second;
         if (is_final(job.status) && now - job.finished >= limits_.ttl) {
             if (!job.idempotency_key.empty()) by_key_.erase({job.user_id, job.idempotency_key});
+            events_.erase(job.id);
             it = jobs_.erase(it);
         } else {
             ++it;

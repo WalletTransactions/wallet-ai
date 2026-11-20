@@ -318,7 +318,16 @@ int main() {
     limits.max_active_per_user = static_cast<std::size_t>(std::stoi(env_or("AI_MAX_ACTIVE_PER_USER", "3")));
     limits.max_per_minute = std::stoi(env_or("LLM_MAX_PER_MINUTE", "10"));
     limits.ttl = std::chrono::seconds(std::stoi(env_or("AI_JOB_TTL_SECS", "600")));
+    limits.max_events = static_cast<std::size_t>(std::max(10, env_int("AI_STREAM_MAX_EVENTS", 2000)));
     state.jobs = std::make_unique<jobs::Store>(limits);
+
+    // Поток событий chat (chat-sse-events): выключен по умолчанию, пока гейтвей
+    // не умеет проксировать text/event-stream.
+    state.stream_enabled = env_or("AI_STREAM_ENABLED", "false") == "true";
+    state.stream_max = std::max(1, env_int("AI_STREAM_MAX", 20));
+    state.streams = std::make_unique<aiapi::StreamGate>(state.stream_max,
+                                                        std::max(1, env_int("AI_STREAM_MAX_PER_USER", 3)));
+    state.stream_ping = std::chrono::seconds(std::max(1, env_int("AI_STREAM_PING_SECS", 15)));
 
     if (!setup_chat(state, prompt_dir, auth_service_url)) return 1;
     setup_imports(state, prompt_dir, env_or("DATABASE_URL", ""));
@@ -362,6 +371,12 @@ int main() {
         handle_pre_routing(req, res);
         return authz::gate(req, res, *state.jwks);
     });
+    if (state.stream_enabled) {
+        // Каждый открытый поток держит поток пула: пул растёт на AI_STREAM_MAX,
+        // чтобы потоки не вытесняли обычные запросы.
+        const std::size_t n = CPPHTTPLIB_THREAD_POOL_COUNT + static_cast<std::size_t>(state.stream_max);
+        svr.new_task_queue = [n] { return new httplib::ThreadPool(n, n * 4); };
+    }
     // Выписка до 5 МБ в base64 (D9) — с запасом на JSON вокруг.
     svr.set_payload_max_length(8u * 1024 * 1024);
     aiapi::register_routes(svr, state);
