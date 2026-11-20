@@ -221,3 +221,143 @@ TEST(jobs_stop_unblocks_cloud_take) {
     s.stop();
     t.join();
 }
+
+// ---- Журнал событий задания chat (спека ai-chat-stream) ----
+
+namespace {
+std::string running_chat(jobs::Store& s, const std::string& user = "u1") {
+    auto c = s.create(user, "chat", jobs::Priority::Interactive, json{{"text", "q"}}, "", jobs::Lane::Cloud);
+    s.take(jobs::Lane::Cloud);
+    return c.job.id;
+}
+json delta(const std::string& t) { return {{"text", t}}; }
+} // namespace
+
+TEST(events_ids_ascend_and_done_closes_log) {
+    jobs::Store s(limits());
+    auto id = running_chat(s);
+    CHECK(s.append_event(id, "tool", json{{"name", "balance"}, {"outcome", "ok"}}));
+    s.complete(id, jobs::Status::Done, json{{"text", "ok"}}, "");
+    auto page = s.read_events(id, "u1", 0);
+    REQUIRE(page.has_value());
+    REQUIRE(page->events.size() == 2u);
+    CHECK_EQ(page->events[0].id, 1u);
+    CHECK_EQ(page->events[0].type, std::string("tool"));
+    CHECK_EQ(page->events[1].id, 2u);
+    CHECK_EQ(page->events[1].type, std::string("done"));
+    CHECK_EQ(page->events[1].data["text"].get<std::string>(), std::string("ok"));
+    CHECK(page->finished);
+    CHECK(!s.append_event(id, "delta", delta("late"))); // после завершения — отказ
+}
+
+TEST(events_resume_from_last_event_id) {
+    jobs::Store s(limits());
+    auto id = running_chat(s);
+    s.append_event(id, "delta", delta("a"));
+    s.append_event(id, "tool", json{{"name", "x"}});
+    auto first = s.read_events(id, "u1", 0);
+    CHECK_EQ(first->events.size(), 2u);
+    CHECK(!first->finished);
+    s.append_event(id, "delta", delta("b"));
+    s.complete(id, jobs::Status::Done, json::object(), "");
+    auto rest = s.read_events(id, "u1", 2); // Last-Event-ID: 2
+    REQUIRE(rest->events.size() == 2u);
+    CHECK_EQ(rest->events[0].id, 3u);
+    CHECK_EQ(rest->events[0].data["text"].get<std::string>(), std::string("b"));
+    CHECK_EQ(rest->events[1].type, std::string("done"));
+    CHECK(rest->finished);
+    auto none = s.read_events(id, "u1", 4); // дочитано: пусто, но журнал закрыт
+    CHECK(none->events.empty());
+    CHECK(none->finished);
+}
+
+TEST(events_merge_undelivered_delta_only) {
+    jobs::Store s(limits());
+    auto id = running_chat(s);
+    s.append_event(id, "delta", delta("He"));
+    s.append_event(id, "delta", delta("llo")); // читатель не видел — слились
+    auto p1 = s.read_events(id, "u1", 0);
+    REQUIRE(p1->events.size() == 1u);
+    CHECK_EQ(p1->events[0].data["text"].get<std::string>(), std::string("Hello"));
+    s.append_event(id, "delta", delta("!")); // id 1 уже отдан — новое событие
+    auto p2 = s.read_events(id, "u1", 1);
+    REQUIRE(p2->events.size() == 1u);
+    CHECK_EQ(p2->events[0].id, 2u);
+    CHECK_EQ(p2->events[0].data["text"].get<std::string>(), std::string("!"));
+}
+
+TEST(events_ceiling_keeps_text_in_tail_until_terminal) {
+    auto l = limits();
+    l.max_events = 2;
+    jobs::Store s(l);
+    auto id = running_chat(s);
+    s.append_event(id, "delta", delta("a"));
+    s.read_events(id, "u1", 0); // отдано
+    s.append_event(id, "delta", delta("b"));
+    s.read_events(id, "u1", 1);
+    s.append_event(id, "delta", delta("c")); // потолок: хвост
+    s.append_event(id, "delta", delta("d"));
+    CHECK_EQ(s.read_events(id, "u1", 2)->events.size(), 0u);
+    s.complete(id, jobs::Status::Done, json::object(), "");
+    auto page = s.read_events(id, "u1", 2);
+    REQUIRE(page->events.size() == 2u);
+    CHECK_EQ(page->events[0].type, std::string("delta"));
+    CHECK_EQ(page->events[0].data["text"].get<std::string>(), std::string("cd"));
+    CHECK_EQ(page->events[1].type, std::string("done"));
+}
+
+TEST(events_failed_and_cancelled_give_error) {
+    jobs::Store s(limits());
+    auto a = running_chat(s, "u1");
+    s.complete(a, jobs::Status::Failed, nullptr, "unavailable");
+    auto pa = s.read_events(a, "u1", 0);
+    REQUIRE(pa->events.size() == 1u);
+    CHECK_EQ(pa->events[0].type, std::string("error"));
+    CHECK_EQ(pa->events[0].data["failure"].get<std::string>(), std::string("unavailable"));
+
+    auto b = running_chat(s, "u2");
+    s.append_event(b, "delta", delta("x"));
+    CHECK(s.cancel(b, "u2"));
+    auto pb = s.read_events(b, "u2", 0);
+    REQUIRE(pb->events.size() == 2u);
+    CHECK_EQ(pb->events[1].data["failure"].get<std::string>(), std::string("cancelled"));
+    CHECK(pb->finished);
+    CHECK(!s.append_event(b, "delta", delta("после отмены")));
+}
+
+TEST(events_hidden_from_others_and_non_chat) {
+    jobs::Store s(limits());
+    auto id = running_chat(s, "u1");
+    CHECK(!s.read_events(id, "u2", 0).has_value()); // чужое
+    CHECK(!s.read_events("нет-такого", "u1", 0).has_value());
+    auto p = s.create("u1", "parse_expense", jobs::Priority::Interactive, json{}, "");
+    s.take();
+    CHECK(!s.append_event(p.job.id, "delta", delta("x")));
+    CHECK(!s.read_events(p.job.id, "u1", 0).has_value()); // не chat
+}
+
+TEST(events_wait_wakes_on_new_event) {
+    jobs::Store s(limits());
+    auto id = running_chat(s);
+    std::thread t([&] {
+        std::this_thread::sleep_for(30ms);
+        s.append_event(id, "delta", delta("hi"));
+    });
+    auto page = s.read_events(id, "u1", 0, 2000ms);
+    t.join();
+    REQUIRE(page.has_value());
+    REQUIRE(page->events.size() == 1u);
+    auto idle = s.read_events(id, "u1", 1, 30ms); // новостей нет — пустая страница (пульс)
+    CHECK(idle->events.empty());
+    CHECK(!idle->finished);
+}
+
+TEST(events_dropped_with_job_by_ttl) {
+    FakeClock clock;
+    jobs::Store s(limits(), clock.fn());
+    auto id = running_chat(s);
+    s.complete(id, jobs::Status::Done, json::object(), "");
+    clock.t += 601s;
+    s.sweep();
+    CHECK(!s.read_events(id, "u1", 0).has_value());
+}

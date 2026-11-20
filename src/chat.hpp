@@ -108,8 +108,17 @@ struct Agent {
     std::function<std::time_t()> wall_now = [] { return std::time(nullptr); };
 };
 
+// Связь цикла с журналом событий задания (change chat-sse-events). Пустые
+// функции — цикл работает как раньше, без потока.
+struct Hooks {
+    // type: delta | tool; data — по openapi (jobEvents).
+    std::function<void(const std::string& type, const nlohmann::json& data)> publish;
+    // true — задание отменено, чтение ответа модели пора оборвать.
+    std::function<bool()> cancelled;
+};
+
 // Выполняет задание chat. Outcome::log — для журнала завершения: provider,
 // steps, tools, input_tokens, output_tokens, детали отказа; без текстов.
-parse_expense::Outcome run(const jobs::Job& job, Agent& agent);
+parse_expense::Outcome run(const jobs::Job& job, Agent& agent, const Hooks& hooks = {});
 
 } // namespace chat

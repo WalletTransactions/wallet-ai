@@ -35,6 +35,13 @@ nlohmann::json job_json(const jobs::Job& job);
 
 void register_routes(httplib::Server& svr, AppState& state);
 
+// GET /api/ai/jobs/{id}/events для проверенного пользователя (спека
+// ai-chat-stream): 404 — чужое, истёкшее или не chat, либо поток выключен;
+// 429 busy — лимит потоков; иначе text/event-stream с события after + 1.
+// Без аутентификации — для юнит-тестов.
+void stream_events(AppState& state, const std::string& job_id, const std::string& user_id, std::size_t after,
+                   httplib::Response& res);
+
 // Создание задания chat для проверенного пользователя (тело POST
 // /api/ai/jobs уже разобрано): проверка input, включение конфигурацией,
 // провайдер и полоса, обмен токена. Без httplib — для юнит-тестов.

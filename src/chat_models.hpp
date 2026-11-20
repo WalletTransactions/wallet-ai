@@ -14,6 +14,7 @@
 // только для журнала вызывающего.
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -93,6 +94,14 @@ struct Turn {
     std::string detail; // для журнала: stop_reason, категория отказа, http_N
 };
 
+// Приёмник потока (change chat-sse-events): on_delta получает видимый текст
+// по мере генерации; should_stop (необязателен) спрашивается на каждом куске —
+// true обрывает чтение (отмена задания).
+struct StreamSink {
+    std::function<void(const std::string& text)> on_delta;
+    std::function<bool()> should_stop;
+};
+
 class Model {
 public:
     virtual ~Model() = default;
@@ -101,6 +110,17 @@ public:
     virtual Turn turn(const std::string& system, const std::vector<Message>& messages,
                       const std::vector<mcp::Tool>& tools, bool allow_tools, const std::optional<Credential>& credential,
                       int timeout_ms) = 0;
+
+    // То же, но с потоковой генерацией: итоговый Turn такой же, как у turn(),
+    // а текст по ходу уходит в sink.on_delta. Умолчание — обычный turn() и
+    // весь текст одним куском (модели без потока, тестовые фейки).
+    virtual Turn turn_stream(const std::string& system, const std::vector<Message>& messages,
+                             const std::vector<mcp::Tool>& tools, bool allow_tools,
+                             const std::optional<Credential>& credential, int timeout_ms, const StreamSink& sink) {
+        Turn t = turn(system, messages, tools, allow_tools, credential, timeout_ms);
+        if (t.kind != TurnKind::Error && !t.message.text.empty() && sink.on_delta) sink.on_delta(t.message.text);
+        return t;
+    }
 };
 
 // --- OpenAI-совместимый chat/completions (lmstudio) ---
@@ -119,6 +139,10 @@ nlohmann::json openai_request_body(const OpenAiConfig& cfg, const std::string& s
                                    const std::vector<Message>& messages, const std::vector<mcp::Tool>& tools,
                                    bool allow_tools);
 Turn parse_openai_response(int http_status, const std::string& body);
+// Тело того же запроса с потоком: stream:true и usage в последнем кадре.
+nlohmann::json openai_stream_request_body(const OpenAiConfig& cfg, const std::string& system,
+                                          const std::vector<Message>& messages, const std::vector<mcp::Tool>& tools,
+                                          bool allow_tools);
 
 std::unique_ptr<Model> make_openai_model(OpenAiConfig cfg);
 
@@ -146,6 +170,10 @@ nlohmann::json anthropic_request_body(const AnthropicConfig& cfg, const std::str
 std::vector<std::pair<std::string, std::string>> anthropic_headers(const AnthropicConfig& cfg,
                                                                    const Credential& credential);
 Turn parse_anthropic_response(int http_status, const std::string& body);
+// Тело того же запроса с потоком: stream:true.
+nlohmann::json anthropic_stream_request_body(const AnthropicConfig& cfg, const std::string& system,
+                                             const std::vector<Message>& messages, const std::vector<mcp::Tool>& tools,
+                                             bool allow_tools);
 
 std::unique_ptr<Model> make_anthropic_model(AnthropicConfig cfg);
 

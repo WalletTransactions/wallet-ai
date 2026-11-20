@@ -471,3 +471,96 @@ TEST(chat_metrics_tokens_jobs_steps) {
     CHECK(text.find("ai_chat_steps_bucket{le=\"3\"}") != std::string::npos);
     CHECK(text.find("ai_chat_tool_calls_total{tool=\"list_categories\",result=\"ok\"}") != std::string::npos);
 }
+
+// ---- События хода (change chat-sse-events, tasks 3.1–3.3) ----
+
+namespace {
+
+// Задание в настоящем Store: цикл публикует события, complete() ставит done/error.
+struct StoreRun {
+    jobs::Store store{jobs::Limits{}};
+    parse_expense::Outcome out;
+    std::string id;
+
+    StoreRun(Bench& b, bool with_hooks = true) {
+        auto c = store.create(kUser, chat::kKind, jobs::Priority::Interactive, json{{"text", "q"}}, "", jobs::Lane::Cloud);
+        id = c.job.id;
+        store.take(jobs::Lane::Cloud);
+        jobs::Job j = b.job(kQuestion);
+        j.id = id;
+        chat::Hooks hooks;
+        if (with_hooks) {
+            hooks.publish = [this](const std::string& type, const json& data) { store.append_event(id, type, data); };
+            hooks.cancelled = [this] { return store.cancel_requested(id); };
+        }
+        out = chat::run(j, b.agent, hooks);
+        store.complete(id, out.status, out.result, out.failure);
+    }
+    std::vector<jobs::Event> events() { return store.read_events(id, kUser, 0)->events; }
+};
+
+} // namespace
+
+TEST(chat_events_tool_delta_done_in_order) {
+    Bench b([](int i, const std::vector<chat::Message>&, bool) {
+        if (i == 0) return tool_turn("spending_by_category", {{"from", "2026-09-01"}}, "c1");
+        return text_turn("На няню ушло 42 000 RUB.");
+    });
+    StoreRun run(b);
+    REQUIRE(run.out.status == jobs::Status::Done);
+    auto ev = run.events();
+    REQUIRE(ev.size() == 3u);
+    CHECK_EQ(ev[0].type, std::string("tool"));
+    CHECK_EQ(ev[0].data["name"].get<std::string>(), std::string("spending_by_category"));
+    CHECK_EQ(ev[0].data["outcome"].get<std::string>(), std::string("ok"));
+    CHECK(ev[0].data.dump().find("2026") == std::string::npos); // аргументов и результатов в событии нет
+    CHECK_EQ(ev[1].type, std::string("delta"));
+    CHECK_EQ(ev[1].data["text"].get<std::string>(), std::string("На няню ушло 42 000 RUB."));
+    CHECK_EQ(ev[2].type, std::string("done"));
+    // done несёт тот же result, что GET /api/ai/jobs/{id}; склейка delta = result.text.
+    CHECK_EQ(ev[2].data["text"].get<std::string>(), run.out.result["text"].get<std::string>());
+    CHECK_EQ(ev[1].data["text"].get<std::string>(), run.out.result["text"].get<std::string>());
+}
+
+TEST(chat_events_nobody_listening_same_result) {
+    auto step = [](int i, const std::vector<chat::Message>&, bool) {
+        if (i == 0) return tool_turn("list_categories", json::object(), "c1");
+        return text_turn("Готово.");
+    };
+    Bench with(step), without(step);
+    StoreRun a(with, true);
+    StoreRun c(without, false); // хуки пусты — прежнее поведение
+    CHECK_EQ(a.out.result.dump(), c.out.result.dump());
+    CHECK(a.out.status == c.out.status);
+}
+
+TEST(chat_events_failure_gives_error_event) {
+    Bench b([](int, const std::vector<chat::Message>&, bool) { return error_turn(chat::ModelError::Unavailable); });
+    StoreRun run(b);
+    CHECK(run.out.status == jobs::Status::Failed);
+    auto ev = run.events();
+    REQUIRE(ev.size() == 1u);
+    CHECK_EQ(ev[0].type, std::string("error"));
+    CHECK_EQ(ev[0].data["failure"].get<std::string>(), std::string("unavailable"));
+}
+
+TEST(chat_events_unknown_tool_is_labeled_unknown) {
+    Bench b([](int i, const std::vector<chat::Message>&, bool) {
+        if (i == 0) return tool_turn("выдуманный_инструмент", json::object(), "c1");
+        return text_turn("Ок.");
+    });
+    StoreRun run(b);
+    auto ev = run.events();
+    REQUIRE(ev.size() >= 2u);
+    CHECK_EQ(ev[0].type, std::string("tool"));
+    CHECK_EQ(ev[0].data["name"].get<std::string>(), std::string("unknown")); // выдуманное имя наружу не идёт
+    CHECK_EQ(ev[0].data["outcome"].get<std::string>(), std::string("error"));
+}
+
+TEST(chat_events_not_in_job_log) {
+    Bench b([](int, const std::vector<chat::Message>&, bool) { return text_turn("Секретный ответ про няню."); });
+    StoreRun run(b);
+    std::string log = run.out.log.dump();
+    CHECK(log.find("Секретный") == std::string::npos);
+    CHECK(log.find("delta") == std::string::npos);
+}

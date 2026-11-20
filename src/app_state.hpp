@@ -14,6 +14,7 @@
 #include "db.hpp"
 #include "imports.hpp"
 #include "jobs.hpp"
+#include "stream_gate.hpp"
 #include "llm_client.hpp"
 #include "llm_probe.hpp"
 #include "mcp_client.hpp"
@@ -79,4 +80,12 @@ struct AppState {
     std::unique_ptr<mcp::Client> mcp;
     std::unique_ptr<chat::Conversations> conversations;
     std::unique_ptr<chat::Agent> chat_agent;
+
+    // --- Поток событий задания chat (chat-sse-events) ---
+    // AI_STREAM_ENABLED: выключен — GET /api/ai/jobs/{id}/events отвечает 404.
+    bool stream_enabled = false;
+    int stream_max = 20; // AI_STREAM_MAX: одновременных потоков (пул httplib растёт на столько же)
+    std::unique_ptr<aiapi::StreamGate> streams;
+    // Пульс в молчащем потоке: чтобы прокси не рвали соединение.
+    std::chrono::milliseconds stream_ping{15000};
 };

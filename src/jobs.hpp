@@ -18,6 +18,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "nlohmann/json.hpp"
 
@@ -67,6 +68,22 @@ struct Limits {
     std::size_t max_active_per_user = 3;     // незавершённых заданий
     int max_per_minute = 10;                 // новых заданий на пользователя
     std::chrono::seconds ttl{600};           // сколько хранить завершённое
+    std::size_t max_events = 2000;           // AI_STREAM_MAX_EVENTS: потолок журнала событий задания
+};
+
+// Событие хода задания chat (спека ai-chat-stream). id — 1, 2, 3... в пределах
+// задания; type — delta | tool | done | error.
+struct Event {
+    std::size_t id = 0;
+    std::string type;
+    nlohmann::json data;
+};
+
+// Страница журнала: события после `after`. finished — журнал закрыт
+// (done/error) и страница дочитала его до конца: поток пора закрывать.
+struct EventPage {
+    std::vector<Event> events;
+    bool finished = false;
 };
 
 enum class CreateError { None, Busy, RateLimited, TooManyActive };
@@ -112,6 +129,30 @@ public:
 
     void complete(const std::string& id, Status status, nlohmann::json result, const std::string& failure);
 
+    // Журнал событий (только kind=chat). Воркер публикует delta и tool;
+    // done/error ставят complete() и cancel() сами, атомарно со статусом.
+    // false — нет задания, оно не chat или журнал уже закрыт.
+    //
+    // Соседние delta сливаются, пока читатель ещё не получил последнее
+    // событие: id уже отданного события не меняется, переподключение по
+    // Last-Event-ID не теряет и не дублирует текст. За потолком max_events
+    // delta копится в хвосте и выходит одним событием перед done/error.
+    bool append_event(const std::string& id, const std::string& type, nlohmann::json data);
+
+    // Своё задание chat (можно открыть поток событий), без ожидания и без
+    // отметки «отдано читателю».
+    bool can_stream(const std::string& id, const std::string& user_id) const;
+    bool is_stopped() const;
+
+    // Отмена во время Running: воркер по этому флагу обрывает генерацию.
+    bool cancel_requested(const std::string& id) const;
+
+    // События после after (0 — с начала). nullopt — нет, чужое, истекло или
+    // не chat. wait > 0 — ждать появления нового события или закрытия
+    // журнала, но не дольше wait (пустая страница — повод для пульса).
+    std::optional<EventPage> read_events(const std::string& id, const std::string& user_id, std::size_t after,
+                                         std::chrono::milliseconds wait = std::chrono::milliseconds(0));
+
     // Удаляет завершённые задания старше TTL. Зовётся фоновым потоком.
     void sweep();
 
@@ -120,6 +161,15 @@ public:
     std::size_t queued(Priority p, Lane lane = Lane::Local) const;
 
 private:
+    struct EventLog {
+        std::vector<Event> events;
+        std::size_t delivered = 0; // наибольший id, отданный читателю
+        std::string tail;          // delta сверх потолка, ещё не ставшая событием
+        bool closed = false;
+    };
+    // Под mu_. Добавляет событие и будит читателей; закрывает журнал на done/error.
+    bool append_locked(const std::string& id, const std::string& type, nlohmann::json data);
+
     bool user_over_rate(const std::string& user_id, Clock::time_point now);
     std::size_t active_of(const std::string& user_id) const;
 
@@ -131,6 +181,7 @@ private:
     std::condition_variable change_cv_; // задание завершилось — для long-poll
     bool stopped_ = false;
     std::unordered_map<std::string, Job> jobs_;
+    std::unordered_map<std::string, EventLog> events_; // id задания chat -> журнал
     std::deque<std::string> interactive_;
     std::deque<std::string> background_;
     std::deque<std::string> cloud_; // облачная полоса — одна интерактивная очередь
