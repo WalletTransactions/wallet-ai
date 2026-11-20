@@ -30,7 +30,9 @@ struct Stand {
             std::size_t after = 0;
             std::string h = req.get_header_value("Last-Event-ID");
             if (!h.empty()) after = static_cast<std::size_t>(std::stoull(h));
-            aiapi::stream_events(state, req.matches[1], req.get_header_value("X-User"), after, res);
+            std::chrono::milliseconds window{0};
+            if (req.has_param("window_ms")) window = std::chrono::milliseconds(std::stoi(req.get_param_value("window_ms")));
+            aiapi::stream_events(state, req.matches[1], req.get_header_value("X-User"), after, res, window);
         });
         port = svr.bind_to_any_port("127.0.0.1");
         thread = std::thread([this] { svr.listen_after_bind(); });
@@ -53,13 +55,14 @@ struct Stand {
         std::string content_type;
         std::string body;
     };
-    Reply get(const std::string& id, const std::string& user = "u1", const std::string& last_id = "") {
+    Reply get(const std::string& id, const std::string& user = "u1", const std::string& last_id = "",
+              const std::string& query = "") {
         httplib::Client cli("127.0.0.1", port);
         cli.set_read_timeout(5, 0);
         httplib::Headers h = {{"X-User", user}};
         if (!last_id.empty()) h.emplace("Last-Event-ID", last_id);
         Reply r;
-        auto res = cli.Get("/events/" + id, h, [&](const httplib::Response& resp) {
+        auto res = cli.Get("/events/" + id + query, h, [&](const httplib::Response& resp) {
             r.status = resp.status;
             r.content_type = resp.get_header_value("Content-Type");
             return true;
@@ -169,4 +172,27 @@ TEST(events_route_client_disconnect_releases_slot_and_keeps_job) {
     auto job = st.state.jobs->get(id, "u1");
     REQUIRE(job.has_value());
     CHECK(job->status == jobs::Status::Running); // обрыв клиента задание не трогает
+}
+
+TEST(events_route_window_closes_stream_and_resumes) {
+    Stand st;
+    st.state.stream_ping = 5s; // пульс не мешает: закрывает именно окно
+    auto id = st.chat_job();
+    st.state.jobs->append_event(id, "tool", {{"name", "a"}, {"outcome", "ok"}});
+    auto t0 = std::chrono::steady_clock::now();
+    auto r = st.get(id, "u1", "", "?window_ms=300");
+    auto took = std::chrono::steady_clock::now() - t0;
+    CHECK_EQ(r.status, 200);
+    CHECK(has(r.body, "id: 1\nevent: tool"));
+    CHECK(!has(r.body, "event: done"));        // задание не закончилось — поток закрыт окном
+    CHECK(took < 2s);                          // не ждали пульса (5 с) и не висели
+    CHECK(!has(r.body, ": ping"));
+    for (int i = 0; i < 40 && st.state.streams->open() > 0; ++i) std::this_thread::sleep_for(25ms);
+    CHECK_EQ(st.state.streams->open(), 0);    // слот свободен сразу, без ожидания пульса
+    // Следующее окно продолжает с последнего id и получает остальное.
+    st.state.jobs->append_event(id, "delta", {{"text", "хвост"}});
+    st.state.jobs->complete(id, jobs::Status::Done, json{{"text", "хвост"}}, "");
+    auto next = st.get(id, "u1", "1", "?window_ms=300");
+    CHECK(has(next.body, "id: 2\nevent: delta"));
+    CHECK(has(next.body, "event: done"));
 }

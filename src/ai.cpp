@@ -174,7 +174,18 @@ void handle_events(AppState& state, const httplib::Request& req, httplib::Respon
     applog::set_route("GET /api/ai/jobs/:id/events");
     auto user = session::current_user(req, *state.jwks);
     if (!user) return reply_unauthenticated(res);
-    stream_events(state, req.matches[1], user->user_id, parse_last_event_id(req), res);
+    std::chrono::milliseconds window{0};
+    if (req.has_param("window_ms")) {
+        try {
+            int ms = std::stoi(req.get_param_value("window_ms"));
+            if (ms < kMinStreamWindowMs || ms > kMaxStreamWindowMs) throw std::out_of_range("window_ms");
+            window = std::chrono::milliseconds(ms);
+        } catch (const std::exception&) {
+            return reply(res, 400, {{"error", "window_ms — миллисекунды, " + std::to_string(kMinStreamWindowMs) + ".." +
+                                                  std::to_string(kMaxStreamWindowMs)}});
+        }
+    }
+    stream_events(state, req.matches[1], user->user_id, parse_last_event_id(req), res, window);
 }
 
 void handle_cancel(AppState& state, const httplib::Request& req, httplib::Response& res) {
@@ -205,7 +216,7 @@ json status_json(const llm::Config& cfg, llm::ProbeResult status, bool statement
 }
 
 void stream_events(AppState& state, const std::string& job_id, const std::string& user_id, std::size_t after,
-                   httplib::Response& res) {
+                   httplib::Response& res, std::chrono::milliseconds window) {
     if (!state.stream_enabled || !state.streams || !state.jobs->can_stream(job_id, user_id)) {
         return reply(res, 404, {{"error", "задания нет, оно истекло или это не chat"}});
     }
@@ -220,23 +231,34 @@ void stream_events(AppState& state, const std::string& job_id, const std::string
         std::size_t sent = 0;
         const char* outcome = "client_gone";
         std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+        std::chrono::milliseconds window{0};
     };
     auto progress = std::make_shared<Progress>();
     progress->next = after;
+    progress->window = window;
 
     res.set_header("Cache-Control", "no-cache");
     res.set_header("X-Accel-Buffering", "no"); // nginx/прокси не буферизуют поток
     res.set_chunked_content_provider(
         "text/event-stream",
         [&state, job_id, user_id, progress](std::size_t, httplib::DataSink& sink) {
-            auto page = state.jobs->read_events(job_id, user_id, progress->next, state.stream_ping);
+            // Ограниченное окно: ждём не дольше остатка окна, по его концу закрываем сами.
+            std::chrono::milliseconds wait = state.stream_ping;
+            if (progress->window.count() > 0) {
+                auto left = progress->window - std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                   std::chrono::steady_clock::now() - progress->started);
+                wait = std::clamp(left, std::chrono::milliseconds(1), state.stream_ping);
+            }
+            auto page = state.jobs->read_events(job_id, user_id, progress->next, wait);
             if (!page) { // задание истекло по TTL
                 progress->outcome = "expired";
                 sink.done();
                 return true;
             }
             std::string out;
-            if (page->events.empty() && !page->finished) out = ": ping\n\n";
+            const bool window_over = progress->window.count() > 0 &&
+                                     std::chrono::steady_clock::now() - progress->started >= progress->window;
+            if (page->events.empty() && !page->finished && !window_over) out = ": ping\n\n";
             for (const auto& e : page->events) {
                 out += "id: " + std::to_string(e.id) + "\nevent: " + e.type + "\ndata: " + e.data.dump() + "\n\n";
                 progress->next = e.id;
@@ -245,6 +267,9 @@ void stream_events(AppState& state, const std::string& job_id, const std::string
             if (!out.empty() && !sink.write(out.data(), out.size())) return false; // клиент ушёл
             if (page->finished) {
                 progress->outcome = "finished";
+                sink.done();
+            } else if (window_over) {
+                progress->outcome = "window"; // клиент продолжит с Last-Event-ID
                 sink.done();
             } else if (page->events.empty() && state.jobs->is_stopped()) {
                 progress->outcome = "shutdown";

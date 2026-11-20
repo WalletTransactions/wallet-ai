@@ -20,6 +20,10 @@ namespace aiapi {
 // Дольше держать GET нельзя: у гейтвея read-таймаут к апстриму 30 с.
 inline constexpr int kMaxWaitSecs = 25;
 
+// Пределы окна потока событий, мс (GET /events?window_ms=).
+inline constexpr int kMinStreamWindowMs = 100;
+inline constexpr int kMaxStreamWindowMs = 60000;
+
 // Тело GET /api/ai/status — чистая функция для тестов.
 // enabled — LLM настроена и отвечает с нужной моделью; features — виды
 // заданий, которые сейчас можно создать.
@@ -39,8 +43,10 @@ void register_routes(httplib::Server& svr, AppState& state);
 // ai-chat-stream): 404 — чужое, истёкшее или не chat, либо поток выключен;
 // 429 busy — лимит потоков; иначе text/event-stream с события after + 1.
 // Без аутентификации — для юнит-тестов.
+// window > 0 — поток закрывается сам через window, даже без done/error
+// (клиент продолжит с Last-Event-ID); 0 — до завершения задания.
 void stream_events(AppState& state, const std::string& job_id, const std::string& user_id, std::size_t after,
-                   httplib::Response& res);
+                   httplib::Response& res, std::chrono::milliseconds window = std::chrono::milliseconds(0));
 
 // Создание задания chat для проверенного пользователя (тело POST
 // /api/ai/jobs уже разобрано): проверка input, включение конфигурацией,

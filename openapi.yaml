@@ -298,6 +298,14 @@ paths:
           name: Last-Event-ID
           schema: {type: integer, minimum: 0}
           description: id последнего полученного события
+        - in: query
+          name: window_ms
+          schema: {type: integer, minimum: 100, maximum: 60000}
+          description: |
+            Закрыть поток через столько мс, если задание не завершилось (без
+            `done`/`error`); продолжить — следующим запросом с `Last-Event-ID`.
+            Для клиентов, которые не держат соединение долго (бот). Без параметра
+            поток идёт до завершения задания.
       responses:
         "200":
           description: Поток событий
@@ -316,6 +324,9 @@ paths:
                 id: 3
                 event: done
                 data: {"text":"На няню ушло 42 000 RUB.","conversation_id":"tg-42-1","provider":"lmstudio","steps":2,"tools":["spending_by_category"]}
+        "400":
+          description: '`window_ms` не число или вне 100..60000'
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
         "404":
           description: Нет, истекло, чужое, не `chat` или поток выключен
           content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}

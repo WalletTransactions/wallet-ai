@@ -42,3 +42,8 @@
 - [x] 7.1 wallet-gateway (proxy-sse-stream, wallet-gateway#21, rc.2 на test): потоковый прокси для `text/event-stream` (блокирует выкладку SSE во внешний трафик)
 - [ ] 7.2 wallet-telegram, wallet-web, android-wallet: SSE-клиенты
 - [ ] 7.3 wallet-infra: переменные `AI_STREAM_*`
+
+## 8. Окно потока (по итогам проверки бота на test)
+
+- [x] 8.1 `GET /events?window_ms=` (100..60000): закрытие по окну без `done`, слот освобождается сразу; неверное значение — 400
+- [x] 8.2 Тест: окно закрывает поток, продолжение с `Last-Event-ID`; `openapi.yaml`, README, спека
