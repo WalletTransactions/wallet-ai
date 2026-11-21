@@ -427,3 +427,7 @@ ctest --test-dir build --output-on-failure
 Релиз — git-тегами: `vX.Y.Z-rc.N` публикует образ в ghcr и выкатывает его
 в test, `vX.Y.Z` на том же коммите — тот же образ в prod; `X.Y.Z` должен
 совпадать с `VERSION`. Подробно — [README google-auth, «Версия»](https://github.com/WalletTransactions/google-auth#версия), «Релиз».
+
+## Взаимный TLS внутри контура (необязательно)
+
+Change `add-internal-mtls` (wallet-infra, шаг 7). `INTERNAL_MTLS=true` (его задаёт `compose.mtls.yaml`, весь контур) вместе с `TLS_CERT`, `TLS_KEY`, `TLS_CA` включает mTLS на сервере сервиса: клиентский сертификат от CA контура обязателен, рукопожатие без него не завершается; вызовы к другим сервисам контура идут по https с сертификатом. Без `INTERNAL_MTLS` сервер остаётся обычным HTTP, как раньше (`TLS_*` сами по себе включают только mTLS к служебному порту google-auth). Неполные `TLS_*` или нечитаемые файлы — ошибка старта. Подробнее — `wallet-infra/infra/env/README.md`, «mTLS внутри контура».

@@ -25,6 +25,8 @@
 // инструментов не попадают и в detail — он только для журнала вызывающего.
 #pragma once
 
+#include "net/tls.hpp"
+
 #include <memory>
 #include <string>
 #include <vector>
@@ -136,6 +138,8 @@ public:
 struct Config {
     std::string url; // WALLET_MCP_URL
     int connect_timeout_ms = 2000;
+    // mTLS к wallet-mcp (INTERNAL_MTLS=true): https, клиентский сертификат; пусто — HTTP.
+    nettls::Config tls;
 };
 
 // Пустой или негодный url — все вызовы сразу ToolsUnavailable без сети.

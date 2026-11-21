@@ -1,6 +1,7 @@
 #include "net/tls.hpp"
 
 #include <cstdlib>
+#include <stdexcept>
 
 namespace nettls {
 
@@ -34,6 +35,37 @@ LoadResult config_from(const std::string& cert, const std::string& key, const st
 }
 
 LoadResult config_from_env() { return config_from(env("TLS_CERT"), env("TLS_KEY"), env("TLS_CA")); }
+
+Settings settings_from_env() {
+    Settings s;
+    auto loaded = config_from_env();
+    if (!loaded.error.empty()) {
+        s.error = loaded.error;
+        return s;
+    }
+    s.config = loaded.config;
+    const std::string full = env("INTERNAL_MTLS");
+    if (!full.empty() && full != "true" && full != "false") {
+        s.error = "INTERNAL_MTLS должен быть true или false, получено: " + full;
+        return s;
+    }
+    if (full == "true") {
+        if (!s.config.enabled()) {
+            s.error = "INTERNAL_MTLS=true, но не заданы TLS_CERT, TLS_KEY, TLS_CA";
+            return s;
+        }
+        s.serve = true;
+        s.call_internal = true;
+    }
+    return s;
+}
+
+httplib::Client client_value(const std::string& base_url, const Config& cfg) {
+    std::string err;
+    auto client = make_client(base_url, cfg, &err);
+    if (!client) throw std::runtime_error(err.empty() ? "TLS-клиент не создан" : err);
+    return std::move(*client);
+}
 
 std::string to_https(const std::string& base_url) {
     static const std::string kHttp = "http://";
