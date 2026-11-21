@@ -227,7 +227,11 @@ bool setup_chat(AppState& state, const std::string& prompt_dir, const std::strin
     }
     state.chat_enabled = !mcp_url.empty() && !exchange_secret.empty();
     state.mcp = mcp::make_http_client({mcp_url});
-    state.auth_exchange = auth_exchange::make_http_client({auth_service_url, exchange_secret});
+    // /internal/token/exchange — на служебный порт google-auth, если задан
+    // AUTH_INTERNAL_URL (change add-internal-mtls, D11); JWKS — с публичного.
+    std::string auth_internal_url = strip_trailing_slash(env_or("AUTH_INTERNAL_URL", ""));
+    if (auth_internal_url.empty()) auth_internal_url = auth_service_url;
+    state.auth_exchange = auth_exchange::make_http_client({auth_internal_url, exchange_secret});
 
     state.conversations = std::make_unique<chat::Conversations>(
         static_cast<std::size_t>(std::max(0, env_int("AI_CHAT_HISTORY_TURNS", 6))),
