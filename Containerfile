@@ -65,6 +65,9 @@ COPY third_party/swagger-ui/ /app/vendor/swagger-ui/
 # той же версии, что и код, который на неё выкатывается.
 COPY migrations/ /migrations/
 
+# Метка поддержки взаимного TLS (change add-internal-mtls, design D8).
+LABEL org.wallet.mtls="1"
+
 USER appuser
 EXPOSE 8087
 

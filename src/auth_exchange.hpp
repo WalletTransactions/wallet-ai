@@ -18,6 +18,8 @@
 #include <memory>
 #include <string>
 
+#include "net/tls.hpp"
+
 namespace auth_exchange {
 
 inline constexpr const char* kGrantType = "urn:ietf:params:oauth:grant-type:token-exchange";
@@ -70,6 +72,9 @@ struct Config {
     std::string audience = kAudienceMcp;
     int connect_timeout_ms = 2000;
     int timeout_ms = 5000; // дедлайн на весь запрос
+    // TLS_CERT/TLS_KEY/TLS_CA: заданы — https к служебному порту google-auth с клиентским
+    // сертификатом (add-internal-mtls); пусто — обычный HTTP.
+    nettls::Config tls;
 };
 
 // Пустой auth_url или secret — exchange сразу отвечает Unavailable без сети

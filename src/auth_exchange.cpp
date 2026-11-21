@@ -3,6 +3,7 @@
 #include <utility>
 
 #include "httplib.h"
+#include "net/tls.hpp"
 #include "nlohmann/json.hpp"
 #include "util/log.hpp"
 
@@ -85,7 +86,12 @@ public:
             return out;
         }
         // Клиент на вызов: обмен — раз на задание chat.
-        httplib::Client cli(cfg_.auth_url);
+        auto client = nettls::make_client(cfg_.auth_url, cfg_.tls);
+        if (!client) {
+            out.error = "tls_client_not_created";
+            return out;
+        }
+        httplib::Client& cli = *client;
         cli.set_connection_timeout(cfg_.connect_timeout_ms / 1000, (cfg_.connect_timeout_ms % 1000) * 1000);
         cli.set_read_timeout(cfg_.timeout_ms / 1000, (cfg_.timeout_ms % 1000) * 1000);
         cli.set_write_timeout(cfg_.timeout_ms / 1000, (cfg_.timeout_ms % 1000) * 1000);
