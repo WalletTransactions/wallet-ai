@@ -232,6 +232,18 @@ Access-токен google-auth (Bearer или cookie `session`), подпись �
 (`google-auth/src/token_claims.hpp`: есть у токенов пользователя и бота).
 Токен без `aud` (старого формата) отвергается 401: `ai:use` в нём нет.
 
+## Взаимный TLS к google-auth (необязательно)
+
+Change `add-internal-mtls` (wallet-infra). Заданы `TLS_CERT`, `TLS_KEY`, `TLS_CA`
+(сертификат wallet-ai и корень CA контура; все три или ни одной) — обмен токена
+(`/internal/token/exchange`) идёт на служебный TLS-порт google-auth по `https` с
+клиентским сертификатом, CN которого — `wallet-ai`. Сервер проверяется по CA контура и по
+имени из `AUTH_INTERNAL_URL` (`https://google-auth-internal:8443`). Не заданы — обычный
+HTTP, как раньше. Задано не всё или файлы нечитаемы — ошибка старта. Режим виден в
+журнале старта чата («обмен токена идёт на … (mTLS)»). Секрет `AUTH_EXCHANGE_SECRET`
+остаётся: google-auth сверяет с ним CN сертификата (расхождение — отказ в режимах
+enforce-tls и enforce). Ответ 403 бот чата считает недоступностью обмена.
+
 ## Конфиг
 
 | Переменная | По умолчанию | Смысл |

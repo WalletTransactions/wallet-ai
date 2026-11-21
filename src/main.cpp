@@ -231,7 +231,28 @@ bool setup_chat(AppState& state, const std::string& prompt_dir, const std::strin
     // AUTH_INTERNAL_URL (change add-internal-mtls, D11); JWKS — с публичного.
     std::string auth_internal_url = strip_trailing_slash(env_or("AUTH_INTERNAL_URL", ""));
     if (auth_internal_url.empty()) auth_internal_url = auth_service_url;
-    state.auth_exchange = auth_exchange::make_http_client({auth_internal_url, exchange_secret});
+    // Взаимный TLS к служебному порту google-auth (change add-internal-mtls, шаг 5): заданы
+    // TLS_CERT/TLS_KEY/TLS_CA — обмен идёт по https с клиентским сертификатом. Задано не всё
+    // или файлы нечитаемы — ошибка старта, а не молчаливый возврат на HTTP.
+    auto tls_loaded = nettls::config_from_env();
+    if (!tls_loaded.error.empty()) {
+        applog::error(tls_loaded.error);
+        return false;
+    }
+    if (tls_loaded.config.enabled()) {
+        std::string tls_error;
+        if (!nettls::make_client(auth_internal_url, tls_loaded.config, &tls_error)) {
+            applog::error(tls_error);
+            return false;
+        }
+    }
+    auth_exchange::Config exchange_cfg;
+    exchange_cfg.auth_url = auth_internal_url;
+    exchange_cfg.secret = exchange_secret;
+    exchange_cfg.tls = tls_loaded.config;
+    state.auth_exchange = auth_exchange::make_http_client(std::move(exchange_cfg));
+    applog::info(std::string("chat: обмен токена идёт на ") + auth_internal_url +
+                 (tls_loaded.config.enabled() ? " (mTLS)" : " (HTTP)"));
 
     state.conversations = std::make_unique<chat::Conversations>(
         static_cast<std::size_t>(std::max(0, env_int("AI_CHAT_HISTORY_TURNS", 6))),
