@@ -290,7 +290,7 @@ private:
         }
         // Клиент на вызов: запросы редкие (несколько на задание), по
         // внутренней сети, а клиент общий для потоков воркеров.
-        httplib::Client cli(endpoint_.origin);
+        httplib::Client cli = nettls::client_value(endpoint_.origin, cfg_.tls);
         cli.set_connection_timeout(cfg_.connect_timeout_ms / 1000, (cfg_.connect_timeout_ms % 1000) * 1000);
         cli.set_read_timeout(timeout_ms / 1000, (timeout_ms % 1000) * 1000);
         cli.set_write_timeout(timeout_ms / 1000, (timeout_ms % 1000) * 1000);

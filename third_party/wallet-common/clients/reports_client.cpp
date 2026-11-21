@@ -15,13 +15,20 @@ namespace {
 
 class HttpReportsApi final : public ReportsApi {
 public:
-    HttpReportsApi(const std::string& base_url, const std::string& error_metric)
-        : base_url_(base_url), error_metric_(error_metric) {}
+    HttpReportsApi(const std::string& base_url, const std::string& error_metric, nettls::Config tls)
+        : base_url_(base_url), error_metric_(error_metric), tls_(std::move(tls)) {}
 
     Response get(const std::string& path_and_query, const std::string& access_token) override {
         // Клиент на вызов: запросов мало, а у httplib::Client нет гарантий на
         // переиспользование после ошибок.
-        httplib::Client client(base_url_);
+        // tls включён (весь контур на mTLS) — https с клиентским сертификатом.
+        auto owned = nettls::make_client(base_url_, tls_);
+        Response out;
+        if (!owned) {
+            out.error = "TLS-клиент wallet-report не создан (TLS_CERT, TLS_KEY, TLS_CA)";
+            return out;
+        }
+        httplib::Client& client = *owned;
         client.set_connection_timeout(5, 0);
         client.set_read_timeout(15, 0);
 
@@ -29,7 +36,6 @@ public:
         std::string trace_id = applog::current_trace_id();
         if (!trace_id.empty()) headers.emplace("X-Trace-Id", trace_id);
 
-        Response out;
         auto res = client.Get(path_and_query, headers);
         if (!res) {
             metrics::inc_counter(error_metric_, "Ошибки запросов к wallet-report.", "kind", "network");
@@ -55,6 +61,7 @@ public:
 private:
     std::string base_url_;
     std::string error_metric_;
+    nettls::Config tls_;
 };
 
 } // namespace
@@ -73,8 +80,9 @@ std::string url_encode(const std::string& value) {
     return out;
 }
 
-std::unique_ptr<ReportsApi> make_http_api(const std::string& base_url, const std::string& error_metric) {
-    return std::make_unique<HttpReportsApi>(base_url, error_metric);
+std::unique_ptr<ReportsApi> make_http_api(const std::string& base_url, const std::string& error_metric,
+                                          const nettls::Config& tls) {
+    return std::make_unique<HttpReportsApi>(base_url, error_metric, tls);
 }
 
 } // namespace reports

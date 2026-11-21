@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 
+#include "net/tls.hpp"
 #include "nlohmann/json.hpp"
 
 namespace reports {
@@ -30,6 +31,10 @@ std::string url_encode(const std::string& value);
 
 // error_metric — счётчик ошибок с лейблом kind (network, http_<код>): у
 // каждого сервиса свой (бот — tg_reports_errors_total, он в дашборде).
-std::unique_ptr<ReportsApi> make_http_api(const std::string& base_url, const std::string& error_metric);
+//
+// tls — mTLS к wallet-report (add-internal-mtls): передают nettls::internal_client_config(settings);
+// пустая — обычный HTTP, как раньше.
+std::unique_ptr<ReportsApi> make_http_api(const std::string& base_url, const std::string& error_metric,
+                                          const nettls::Config& tls = {});
 
 } // namespace reports

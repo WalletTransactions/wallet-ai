@@ -226,7 +226,11 @@ bool setup_chat(AppState& state, const std::string& prompt_dir, const std::strin
         return false;
     }
     state.chat_enabled = !mcp_url.empty() && !exchange_secret.empty();
-    state.mcp = mcp::make_http_client({mcp_url});
+    // Вызовы к wallet-mcp — mTLS, когда весь контур на INTERNAL_MTLS=true (шаг 7).
+    mcp::Config mcp_cfg;
+    mcp_cfg.url = mcp_url;
+    mcp_cfg.tls = nettls::internal_client_config(nettls::settings_from_env());
+    state.mcp = mcp::make_http_client(mcp_cfg);
     // /internal/token/exchange — на служебный порт google-auth, если задан
     // AUTH_INTERNAL_URL (change add-internal-mtls, D11); JWKS — с публичного.
     std::string auth_internal_url = strip_trailing_slash(env_or("AUTH_INTERNAL_URL", ""));
@@ -328,7 +332,7 @@ int main() {
 
     state.reports = reports::make_http_api(
         strip_trailing_slash(env_required("WALLET_REPORT_URL", "адрес wallet-report, например http://127.0.0.1:8084")),
-        "ai_reports_errors_total");
+        "ai_reports_errors_total", nettls::internal_client_config(nettls::settings_from_env()));
     state.llm_client = llm::make_http_client(state.llm, state.expense_prompt);
 
     // Вид задания parse_expense (TODO_wallet_ai.md, §3, §5): сколько думать,
@@ -391,7 +395,22 @@ int main() {
     std::string host = env_or("HOST", "127.0.0.1");
     int port = std::stoi(env_or("PORT", "8087"));
 
-    httplib::Server svr;
+    // Взаимный TLS внутри контура (change add-internal-mtls, шаг 7): INTERNAL_MTLS=true — сервер
+    // требует клиентский сертификат от CA контура; иначе обычный HTTP, как раньше. Неполные TLS_*
+    // или нечитаемые файлы — ошибка старта, а не молчаливый возврат на HTTP.
+    auto tls_settings = nettls::settings_from_env();
+    if (!tls_settings.error.empty()) {
+        applog::error(tls_settings.error);
+        return 1;
+    }
+    std::string tls_error;
+    auto svr_owner = nettls::make_server(nettls::server_config(tls_settings), &tls_error);
+    if (!svr_owner) {
+        applog::error(tls_error);
+        return 1;
+    }
+    httplib::Server& svr = *svr_owner;
+    if (tls_settings.serve) applog::info("mTLS: сервер требует клиентский сертификат (INTERNAL_MTLS=true)");
     svr.set_pre_routing_handler([&state](const httplib::Request& req, httplib::Response& res) {
         handle_pre_routing(req, res);
         return authz::gate(req, res, *state.jwks);

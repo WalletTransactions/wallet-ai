@@ -42,6 +42,30 @@ LoadResult config_from(const std::string& cert, const std::string& key, const st
 // TLS_CERT, TLS_KEY, TLS_CA из окружения процесса.
 LoadResult config_from_env();
 
+// Что сервис делает с TLS (change add-internal-mtls). Материал (TLS_CERT, TLS_KEY, TLS_CA) один,
+// а включают его два разных переключателя:
+//   - сам материал (config.enabled()) — mTLS к служебному порту google-auth (пилот, шаги 4–5):
+//     так включено у бота, wallet-mcp и wallet-ai, пока контур целиком на HTTP;
+//   - INTERNAL_MTLS=true (задаёт compose.mtls.yaml, весь контур, шаг 7) — сервер сервиса
+//     требует клиентский сертификат (serve), а вызовы к другим сервисам контура идут по
+//     https с сертификатом (call_internal).
+// Без разделения пилот на test включил бы TLS на серверах ai и mcp и сломал гейтвей.
+struct Settings {
+    Config config;
+    bool serve = false;         // свой сервер — mTLS
+    bool call_internal = false; // вызовы к сервисам контура — mTLS
+    std::string error;          // не пусто — конфигурация неверна, сервис не стартует
+};
+
+// TLS_CERT, TLS_KEY, TLS_CA и INTERNAL_MTLS из окружения. INTERNAL_MTLS=true без полного
+// набора TLS_* — ошибка (молча выключенная защита хуже отказа на старте).
+Settings settings_from_env();
+
+// Конфигурация для своего сервера / для вызовов внутри контура: пустая (HTTP), если
+// соответствующий переключатель выключен.
+inline Config server_config(const Settings& s) { return s.serve ? s.config : Config{}; }
+inline Config internal_client_config(const Settings& s) { return s.call_internal ? s.config : Config{}; }
+
 // Сервер: выключено — httplib::Server; включено — SSLServer, который требует
 // клиентский сертификат от CA (рукопожатие без него не проходит). nullptr и error —
 // если файлы не читаются, ключ не подходит к сертификату или нет поддержки OpenSSL.
@@ -52,6 +76,11 @@ std::unique_ptr<httplib::Server> make_server(const Config& cfg, std::string* err
 // сервера проверяется по CA И по имени хоста из URL (SAN).
 std::unique_ptr<httplib::Client> make_client(const std::string& base_url, const Config& cfg,
                                              std::string* error = nullptr);
+
+// То же по значению — для кода, где клиент создаётся прямо в вызове (`httplib::Client cli(url)`).
+// Бросает std::runtime_error, если TLS включён, а клиент создать нельзя (неверные файлы): на
+// старте сервисы это проверяют, поэтому в рантайме это редкая авария, а не штатный путь.
+httplib::Client client_value(const std::string& base_url, const Config& cfg);
 
 // http://… → https://…; остальное без изменений.
 std::string to_https(const std::string& base_url);
