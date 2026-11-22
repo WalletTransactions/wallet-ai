@@ -1,7 +1,9 @@
 # ai-chat-stream Specification
 
 ## Purpose
-TBD - created by archiving change chat-sse-events. Update Purpose after archive.
+Ход задания `chat` потоком событий (SSE): клиенты получают куски ответа и
+вызовы инструментов по мере генерации, переподключаются с `Last-Event-ID`,
+читают поток ограниченным окном и отменяют задание; число потоков ограничено.
 
 ## Requirements
 
