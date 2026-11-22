@@ -251,7 +251,7 @@ enforce-tls и enforce). Ответ 403 бот чата считает недо�
 | `AUTH_SERVICE_URL` | — | google-auth, JWKS |
 | `LLM_URL` | пусто | база OpenAI API (`http://host.docker.internal:1234/v1`). Пусто — ИИ выключен, `status.enabled=false` |
 | `LLM_MODEL` | — (обязательна при `LLM_URL`) | id из `GET {LLM_URL}/models` |
-| `LLM_CONTEXT` | `8192` | окно модели в LM Studio (`scripts/lms-load.sh`, `LMS_CONTEXT`); по нему режутся фрагменты выписки и считается `max_tokens` ответа |
+| `LLM_CONTEXT` | `8192` | окно, которым пользуется wallet-ai; не больше окна модели в LM Studio (`scripts/lms-load.sh`, `LMS_CONTEXT`, сейчас 16384 — шире ради wallet-docs); по нему режутся фрагменты выписки и считается `max_tokens` ответа |
 | `LLM_API_KEY` | пусто | `Authorization: Bearer` к LLM |
 | `LLM_TIMEOUT_MS` | `15000` | read-таймаут; connect — 2 с |
 | `LLM_PROBE_INTERVAL_SECS` | `60` | как часто проверять LLM |
