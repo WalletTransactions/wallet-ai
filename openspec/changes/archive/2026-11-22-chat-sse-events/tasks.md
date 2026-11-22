@@ -40,8 +40,8 @@
 ## 7. Зависимости в других репозиториях (отдельные изменения)
 
 - [x] 7.1 wallet-gateway (proxy-sse-stream, wallet-gateway#21, rc.2 на test): потоковый прокси для `text/event-stream` (блокирует выкладку SSE во внешний трафик)
-- [ ] 7.2 wallet-telegram, wallet-web, android-wallet: SSE-клиенты
-- [ ] 7.3 wallet-infra: переменные `AI_STREAM_*`
+- [x] 7.2 SSE-клиенты: wallet-telegram (chat-live-reply, на проде) и wallet-web (chat-live-reply, в main, выкладка ждёт google-auth 0.4.0). android-wallet — в приложении нет чата с ИИ (только разбор выписок), клиент не нужен; появится чат — отдельным изменением
+- [x] 7.3 wallet-infra: переменные `AI_STREAM_*` (ai-stream-env, заархивирован)
 
 ## 8. Окно потока (по итогам проверки бота на test)
 
