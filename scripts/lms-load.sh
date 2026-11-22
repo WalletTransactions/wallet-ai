@@ -18,8 +18,10 @@
 #   LMS_DISPLAY      дисплей сессии при запуске по SSH (:0)
 #   LMS_MODEL_KEY    модель из `lms ls`            (qwen/qwen3-8b)
 #   LMS_IDENTIFIER   id в API = LLM_MODEL          (wallet-parse)
-#   LMS_CONTEXT      контекст, токенов             (8192 — = LLM_CONTEXT wallet-ai;
-#                    qwen3-8b с ним ~4,7 ГБ из 8 на GTX 1070)
+#   LMS_CONTEXT      контекст, токенов             (16384, с 2026-11-22: промпт справки
+#                    wallet-docs с README-чанками `ops` — до ~9,5 тыс. токенов, в 8192 не
+#                    входил. LLM_CONTEXT wallet-ai остаётся 8192 — это его потолок, он
+#                    не обязан равняться окну. На GTX 1070 занято ~7,8 ГБ из 8: запаса мало)
 #   LMS_GPU          доля на GPU: max/off/0..1     (max)
 #   LMS_TTL          простой до авто-выгрузки, с   (3600; 0 — не выгружать)
 #   LMS_PORT         порт сервера                  (1234)
@@ -50,7 +52,7 @@ LMS_APP="${LMS_APP:-/opt/LM-Studio/lm-studio}"
 LMS_APP_LOG="${LMS_APP_LOG:-$HOME/.lmstudio/lm-studio-launch.log}"
 LMS_MODEL_KEY="${LMS_MODEL_KEY:-qwen/qwen3-8b}"
 LMS_IDENTIFIER="${LMS_IDENTIFIER:-wallet-parse}"
-LMS_CONTEXT="${LMS_CONTEXT:-8192}"
+LMS_CONTEXT="${LMS_CONTEXT:-16384}"
 LMS_GPU="${LMS_GPU:-max}"
 LMS_TTL="${LMS_TTL:-3600}"
 LMS_PORT="${LMS_PORT:-1234}"
