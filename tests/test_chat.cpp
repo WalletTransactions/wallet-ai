@@ -186,11 +186,13 @@ TEST(chat_prompt_substitutions_and_real_file) {
 
     // Настоящий prompts/chat.txt: версия есть, подстановки на месте.
     llm::Prompt real = llm::load_prompt(std::string(WALLET_AI_SOURCE_DIR) + "/prompts/chat.txt");
-    CHECK_EQ(real.version, std::string("chat-v3"));
+    CHECK_EQ(real.version, std::string("chat-v4"));
     // Правила chat-v3 (chat-prompt-v3, D6): имена из ответа/справочника,
-    // «без X» → exclude_categories, месяцы года → avg_per_month, варианты поиска.
+    // «без X» → exclude_categories, месяцы года → avg_per_month, варианты поиска;
+    // chat-v4 (chat-prompt-similar): нулевая категория с similar → повторный вызов.
     for (const char* rule : {"list_categories", "list_wallets", "exclude_categories", "months_of_year",
-                             "[1, 2, 3, 4, 5, 9, 10, 11, 12]", "avg_per_month", "search_operations", "парикмах"}) {
+                             "[1, 2, 3, 4, 5, 9, 10, 11, 12]", "avg_per_month", "search_operations", "парикмах",
+                             "similar", "их total"}) {
         CHECK(real.text.find(rule) != std::string::npos);
     }
     std::string rendered = chat::render_system_prompt(real, "2026-11-04", "14:05:00", "ИНСТРУКЦИИ MCP");
